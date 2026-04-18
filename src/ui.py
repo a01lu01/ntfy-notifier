@@ -42,11 +42,10 @@ class SettingsWindow:
         self._var_auto_start = tk.BooleanVar(value=False)
         self._closed = False
 
-    def show_and_wait(self):
+    def show(self):
         """
-        阻塞调用线程，直到用户关闭窗口。
-        通过 root.after() 在调用线程内驱动 Tk 事件循环，
-        避免多 mainloop() 冲突。
+        非阻塞：在 _master 上显示设置窗口。
+        如果没有 master，则创建新的 Tk() 并驱动事件循环。
         """
         root = self._master or tk.Tk()
         if not self._master:
@@ -58,33 +57,36 @@ class SettingsWindow:
         win.geometry("480x540")
         win.resizable(False, False)
         win.configure(bg=_FLUENT_BG)
-        win.transient(root)
-        win.grab_set()
 
         self._build_header(win)
         self._build_form(win)
         self._build_footer(win)
 
-        win.update_idletasks()
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        w, h = win.winfo_width(), win.winfo_height()
-        win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
-
         win.protocol("WM_DELETE_WINDOW", self._cancel)
 
-        # 在调用线程中驱动 Tk 事件循环，直到 _closed 标志被置位
-        if self._master:
-            root.wait_window(win)
-        else:
+        # 居中并显示
+        win.update_idletasks()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"480x540+{(sw - 480) // 2}+{(sh - 540) // 2}")
+        win.update()
+        win.deiconify()
+        win.after(0, lambda: (win.lift(), win.focus_force()))
+
+        # 无 master 时在调用线程中驱动 Tk 事件循环
+        if not self._master:
             while not self._closed and win.winfo_exists():
                 win.update()
                 win.update_idletasks()
 
+    def show_and_wait(self):
+        """兼容性别名，内部调用 show()。"""
+        self.show()
+
     # ── UI 构建 ─────────────────────────────────────────────────────────────
 
     def _build_header(self, parent: tk.Widget):
-        frame = tk.Frame(parent, bg=_FLUENT_BG, pady=(24, 16))
-        frame.pack(fill="x", padx=32)
+        frame = tk.Frame(parent, bg=_FLUENT_BG, padx=32, pady=24)
+        frame.pack(fill="x")
 
         tk.Label(
             frame, text="ntfy-Notifier 设置",
@@ -125,7 +127,7 @@ class SettingsWindow:
         ent_int.pack(side="left")
         ent_int.insert(0, str(self._current.get("poll_interval", 3)))
         tk.Label(row4, text=" 秒", font=("Segoe UI", 9),
-                 fg=_FLUENT_SUBTEXT, bg=_FLUENT_BG).pack(side="left", padx=(6, 0))
+                 fg=_FLUENT_SUBTEXT, bg=_FLUENT_BG).pack(side="left", padx=6)
         self._entries["poll_interval"] = ent_int
 
         tk.Frame(form, height=1, bg=_FLUENT_BORDER).grid(row=6, column=0, sticky="we", pady=(8, 8))
@@ -154,7 +156,7 @@ class SettingsWindow:
             command=self._cancel,
             cursor="hand2",
         )
-        btn_cancel.pack(side="right", padx=(8, 0))
+        btn_cancel.pack(side="right", padx=8)
 
         btn_save = tk.Button(
             footer, text="保存",

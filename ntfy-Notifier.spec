@@ -5,22 +5,43 @@ PY_PREFIX = sys.prefix
 PY_BIN    = os.path.join(PY_PREFIX, 'Library', 'bin')
 PY_LIB    = os.path.join(PY_PREFIX, 'Library', 'lib')
 PY_DLLS   = os.path.join(PY_PREFIX, 'DLLs')
+PY_SITE   = os.path.join(PY_PREFIX, 'lib', 'site-packages')
+
+import PyInstaller.utils.hooks as h
+
+# Properly collect all pystray resources
+pystray_all   = h.collect_all('pystray')
+pystray_datas = pystray_all[0]   # data files to bundle
+pystray_bins  = pystray_all[1]   # binaries (usually empty)
+pystray_hid   = pystray_all[2]   # hidden imports
 
 a = Analysis(
     ['src\\ntfy_notifier.py'],
     pathex=[PY_PREFIX],
     binaries=[
-        (os.path.join(PY_BIN,   'tcl86t.dll'),  '.'),
-        (os.path.join(PY_BIN,   'tk86t.dll'),   '.'),
-        (os.path.join(PY_DLLS, '_tkinter.pyd'), '.'),
+        # All DLLs from PY_BIN (ffi.dll, libssl, libcrypto, expat, etc.)
+        (PY_BIN,  '.'),
+        # All .pyd modules from PY_DLLS needed by Python stdlib
+        (os.path.join(PY_DLLS, '_ctypes.pyd'),   '.'),
+        (os.path.join(PY_DLLS, '_tkinter.pyd'),  '.'),
+        (os.path.join(PY_DLLS, '_ssl.pyd'),     '.'),
+        (os.path.join(PY_DLLS, '_hashlib.pyd'), '.'),
+        (os.path.join(PY_DLLS, '_bz2.pyd'),     '.'),
+        (os.path.join(PY_DLLS, '_lzma.pyd'),    '.'),
+        (os.path.join(PY_DLLS, 'pyexpat.pyd'), '.'),
     ],
     datas=[
         ('src', 'src'),
         (os.path.join(PY_LIB, 'tcl8.6'), 'tcl8.6'),
         (os.path.join(PY_LIB, 'tk8.6'),  'tk8.6'),
-    ],
+    ] + pystray_datas,
     hiddenimports=[
-        'pystray._win32_images',
+        # pystray + all submodules
+        *pystray_hid,
+        # six / six.moves (pystray depends on this)
+        'six',
+        'six.moves',
+        # tkinter
         '_tkinter',
         'tkinter',
         'tkinter.ttk',
@@ -46,7 +67,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='ntfy-Notifier-v2',   # <-- 不同的文件名，绕过文件锁
+    name='ntfy-Notifier-v3',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

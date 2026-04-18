@@ -20,15 +20,22 @@ DEFAULT_CONFIG = {
 }
 
 
-def load_config() -> dict:
-    """加载配置，如无配置文件则返回默认配置并写入。"""
+def load_config() -> tuple[dict, bool]:
+    """
+    加载配置，如无配置文件则返回默认配置并写入。
+    返回 (config_dict, is_first_run)
+    """
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                return json.load(f), False
         except (json.JSONDecodeError, IOError):
             pass
-    return DEFAULT_CONFIG.copy()
+    # 首次运行：写入默认配置并返回
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(DEFAULT_CONFIG.copy(), f, indent=4, ensure_ascii=False)
+    return DEFAULT_CONFIG.copy(), True
 
 
 def save_config(config: dict) -> None:

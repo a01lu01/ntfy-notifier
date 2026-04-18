@@ -47,7 +47,7 @@ def _set_auto_start(enabled: bool):
 
 
 def _open_settings():
-    """在主 Tk 线程中弹出设置窗口（非阻塞，通过 after 调度）。"""
+    """在主 Tk 线程中弹出设置窗口（通过 after 调度）。"""
     if _root is None:
         return
 
@@ -59,7 +59,6 @@ def _open_settings():
 
     from src.ui import SettingsWindow
     win = SettingsWindow(_config, on_save=on_save, on_cancel=None, master=_root)
-    # 立即显示（Tk 已运行，窗口会立即出现）
     win.show()
 
 
@@ -68,7 +67,7 @@ def main():
 
     import tkinter as tk
 
-    _config = load_config()
+    _config, is_first_run = load_config()
 
     # 单例 Tk root（始终存在，隐藏）
     _root = tk.Tk()
@@ -76,9 +75,9 @@ def main():
     # 拦截关闭，防止 root 被意外销毁
     _root.protocol("WM_DELETE_WINDOW", lambda: None)
 
-    # 首次运行无配置 → 在 mainloop 启动后立即弹出设置
-    if not _config.get("server") or not _config.get("topic"):
-        _root.after(100, _open_settings)
+    # 首次运行 → 在 mainloop 启动后立即弹出设置窗口
+    if is_first_run:
+        _root.after(200, _open_settings)
 
     if _config.get("auto_start"):
         _set_auto_start(True)
@@ -150,8 +149,8 @@ def _poll_loop():
                 if _tray:
                     _tray.update(False)
             traceback.print_exc()
-
-        time.sleep(cfg.get("poll_interval", 3))
+            # 避免异常后立即重试造成忙等
+            time.sleep(min(cfg.get("poll_interval", 3), 5))
 
 
 if __name__ == "__main__":

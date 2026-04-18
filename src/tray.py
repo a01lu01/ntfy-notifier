@@ -70,19 +70,18 @@ class TrayIcon:
         )
 
     def _make_icon(self, connected: bool) -> "Icon":
-        icon = Icon(
+        return Icon(
             "ntfy-notifier",
             _build_tray_icon_image(),
             "ntfy-Notifier",
             self._build_menu(connected),
         )
-        return icon
 
     def start(self, connected: bool = False):
         """在后台线程启动托盘图标。"""
         if not _PYSTRAY_AVAILABLE:
             import sys
-            print("[Tray] pystray 未安装，托盘功能不可用。", file=sys.stderr)
+            print("[Tray] pystray 不可用，托盘功能不可用。", file=sys.stderr)
             return
         self._icon = self._make_icon(connected)
         self._thread = threading.Thread(target=self._run, daemon=True, name="TrayIconThread")
