@@ -1,0 +1,4 @@
+﻿pystray>=0.17.0
+pillow>=10.0.0
+requests>=2.31.0
+pywin32>=306; platform_system == "Windows"
