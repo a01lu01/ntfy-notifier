@@ -41,6 +41,11 @@ a = Analysis(
         # six / six.moves (pystray depends on this)
         'six',
         'six.moves',
+        # json (standard library, explicit to prevent pystray hook shadowing)
+        'json',
+        'json.decoder',
+        'json.encoder',
+        'json.scanner',
         # tkinter
         '_tkinter',
         'tkinter',
