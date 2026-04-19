@@ -1,4 +1,17 @@
-﻿pystray>=0.17.0
-pillow>=10.0.0
-requests>=2.31.0
+﻿# ntfy-Notifier 运行时依赖
+# ============================
+# 安装方式：pip install -r requirements.txt
+
+pystray>=0.17.0       # 跨平台托盘图标（推荐，已包含线程调度）
+pillow>=10.0.0        # pystray 依赖，用于生成托盘图标图片
+requests>=2.31.0      # HTTP 轮询 ntfy 服务
+
+# Windows 专用（可选，无 pywin32 时 win32gui 后备不可用）
+# pywin32 在 Python 3.14 上需要手动安装：
+#   pip install pywin32
+#   python <site-packages>/pywin32_postinstall.py -install
 pywin32>=306; platform_system == "Windows"
+
+# winrt 通知（可选，无 winrt 时自动降级到 win32gui.MessageBox）
+# winsdk 需要 Visual Studio 才能编译，无预编译 wheel，建议跳过
+# winsdk>=1.0.0; platform_system == "Windows"
