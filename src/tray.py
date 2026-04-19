@@ -168,9 +168,8 @@ def _add_tray():
         ret = windll.shell32.Shell_NotifyIconW(NIM_ADD, byref(n))
         if ret:
             _g_added = True
-        else:
-            err = windll.kernel32.GetLastError()
-    except Exception as e:
+    except Exception:
+        pass
 
 def _remove_tray():
     global _g_added
@@ -240,7 +239,8 @@ class TrayIcon:
             _g_hicon = _mkicon()
             _setup_menu()
             _g_hwnd = _make_tray_window()
-        except Exception as e:
+        except Exception:
+            pass
 
     def start(self, connected=False) -> bool:
         global _g_ok
