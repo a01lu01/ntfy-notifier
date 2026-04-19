@@ -13,7 +13,7 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_CONFIG = {
     "server": "http://your-server:8080",
     "username": "iPhone",
-    "password": "***REMOVED***",
+    "password": "",  # 请在设置中填入你的 ntfy 访问密码
     "topic": "sms",
     "poll_interval": 3,
     "auto_start": False,

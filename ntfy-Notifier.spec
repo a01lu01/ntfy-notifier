@@ -35,9 +35,9 @@ a = Analysis(
         (os.path.join(PY_DLLS, '_bz2.pyd'),     '.'),
         (os.path.join(PY_DLLS, '_lzma.pyd'),    '.'),
         (os.path.join(PY_DLLS, 'pyexpat.pyd'), '.'),
-        # pywin32 DLLs (required by win32gui)
-        (os.path.join(PYWIN32_SYS, 'pythoncom310.dll'), '.'),
-        (os.path.join(PYWIN32_SYS, 'pywintypes310.dll'), '.'),
+        # pywin32 DLLs (required by win32gui) - dynamic Python version
+        (os.path.join(PYWIN32_SYS, f'pythoncom{sys.version_info[0]}{sys.version_info[1]}0.dll'), '.'),
+        (os.path.join(PYWIN32_SYS, f'pywintypes{sys.version_info[0]}{sys.version_info[1]}0.dll'), '.'),
         # pywin32 pyd modules + lib (needed to load pyd at runtime)
         (os.path.join(WIN32_PKG, 'win32gui.pyd'),  '.'),
         (os.path.join(WIN32_PKG, 'win32api.pyd'),  '.'),
@@ -115,13 +115,13 @@ exe = EXE(
     a.datas,
     [],
     name='ntfy-Notifier-v3c',
-    debug=True,
+    debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
