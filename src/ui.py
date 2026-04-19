@@ -54,7 +54,7 @@ class SettingsWindow:
         win = tk.Toplevel(root)
         self._win = win
         win.title("ntfy-Notifier 设置")
-        win.geometry("480x540")
+        win.geometry("480x600")
         win.resizable(False, False)
         win.configure(bg=_FLUENT_BG)
 
@@ -67,7 +67,7 @@ class SettingsWindow:
         # 居中并显示
         win.update_idletasks()
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        win.geometry(f"480x540+{(sw - 480) // 2}+{(sh - 540) // 2}")
+        win.geometry(f"480x600+{(sw - 480) // 2}+{(sh - 600) // 2}")
         win.update()
         win.deiconify()
         win.after(0, lambda: (win.lift(), win.focus_force()))
@@ -101,28 +101,29 @@ class SettingsWindow:
         form.pack(fill="x")
 
         def field_row(label: str, default: str, row: int, show: str = None) -> ttk.Entry:
+            # Label 在上行
             tk.Label(form, text=label, font=("Segoe UI", 9),
                      fg=_FLUENT_SUBTEXT, bg=_FLUENT_BG,
-                     anchor="w").grid(row=row, column=0, sticky="w", pady=(8, 2))
-
+                     anchor="w").grid(row=row, column=0, sticky="w", pady=(10, 2))
+            # Entry 在下行（同一 row 会叠在一起）
             ent = ttk.Entry(form, width=40, font=("Segoe UI", 10))
-            ent.grid(row=row, column=0, sticky="we", pady=(0, 8))
+            ent.grid(row=row + 1, column=0, sticky="we", pady=(0, 8))
             if show:
                 ent.configure(show=show)
             ent.insert(0, default)
             return ent
 
-        self._entries["server"] = field_row("服务器地址", self._current.get("server", ""), 0)
-        self._entries["username"] = field_row("用户名", self._current.get("username", ""), 1)
-        self._entries["password"] = field_row("密码", self._current.get("password", ""), 2, show="*")
-        self._entries["topic"] = field_row("订阅话题", self._current.get("topic", ""), 3)
+        self._entries["server"]    = field_row("服务器地址", self._current.get("server", ""), 0)
+        self._entries["username"] = field_row("用户名",     self._current.get("username", ""), 2)
+        self._entries["password"] = field_row("密码",       self._current.get("password", ""), 4, show="*")
+        self._entries["topic"]    = field_row("订阅话题",   self._current.get("topic", ""), 6)
 
+        # 轮询间隔（手动分行，不用 field_row）
         tk.Label(form, text="轮询间隔", font=("Segoe UI", 9),
                  fg=_FLUENT_SUBTEXT, bg=_FLUENT_BG,
-                 anchor="w").grid(row=4, column=0, sticky="w", pady=(8, 2))
-
+                 anchor="w").grid(row=8, column=0, sticky="w", pady=(10, 2))
         row4 = tk.Frame(form, bg=_FLUENT_BG)
-        row4.grid(row=5, column=0, sticky="w", pady=(0, 8))
+        row4.grid(row=9, column=0, sticky="w", pady=(0, 8))
         ent_int = ttk.Entry(row4, width=10, font=("Segoe UI", 10))
         ent_int.pack(side="left")
         ent_int.insert(0, str(self._current.get("poll_interval", 3)))
@@ -130,7 +131,7 @@ class SettingsWindow:
                  fg=_FLUENT_SUBTEXT, bg=_FLUENT_BG).pack(side="left", padx=6)
         self._entries["poll_interval"] = ent_int
 
-        tk.Frame(form, height=1, bg=_FLUENT_BORDER).grid(row=6, column=0, sticky="we", pady=(8, 8))
+        tk.Frame(form, height=1, bg=_FLUENT_BORDER).grid(row=10, column=0, sticky="we", pady=(8, 8))
 
         self._var_auto_start.set(bool(self._current.get("auto_start", False)))
         cb = tk.Checkbutton(
@@ -141,7 +142,7 @@ class SettingsWindow:
             activeforeground=_FLUENT_ACCENT,
             selectcolor=_FLUENT_BG, anchor="w",
         )
-        cb.grid(row=7, column=0, sticky="w")
+        cb.grid(row=11, column=0, sticky="w")
 
     def _build_footer(self, parent: tk.Widget):
         footer = tk.Frame(parent, bg=_FLUENT_SURFACE, pady=12, padx=24)
