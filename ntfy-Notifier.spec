@@ -36,8 +36,8 @@ a = Analysis(
         (os.path.join(PY_DLLS, '_lzma.pyd'),    '.'),
         (os.path.join(PY_DLLS, 'pyexpat.pyd'), '.'),
         # pywin32 DLLs (required by win32gui) - dynamic Python version
-        (os.path.join(PYWIN32_SYS, f'pythoncom{sys.version_info[0]}{sys.version_info[1]}0.dll'), '.'),
-        (os.path.join(PYWIN32_SYS, f'pywintypes{sys.version_info[0]}{sys.version_info[1]}0.dll'), '.'),
+        (os.path.join(PYWIN32_SYS, f'pythoncom{sys.version_info[0]}{sys.version_info[1]}.dll'), '.'),
+        (os.path.join(PYWIN32_SYS, f'pywintypes{sys.version_info[0]}{sys.version_info[1]}.dll'), '.'),
         # pywin32 pyd modules + lib (needed to load pyd at runtime)
         (os.path.join(WIN32_PKG, 'win32gui.pyd'),  '.'),
         (os.path.join(WIN32_PKG, 'win32api.pyd'),  '.'),
