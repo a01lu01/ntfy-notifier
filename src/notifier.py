@@ -4,6 +4,7 @@ Windows 通知模块 - ntfy-Notifier
 """
 
 import sys
+import json
 import traceback
 
 try:
@@ -60,6 +61,7 @@ def send_toast(title: str, message: str, app_id: str = "ntfy-Notifier") -> bool:
 
 
 # ── 以下为 requests 轮询相关 ────────────────────────────────────────────────
+import json
 
 def fetch_ntfy_messages(server: str, topic: str, username: str = "", password: str = "") -> list[dict]:
     """

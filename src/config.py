@@ -13,7 +13,7 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_CONFIG = {
     "server": "http://114.55.43.156:8080",
     "username": "iPhone",
-    "password": "WHYntfy2026",
+    "password": "",  # 请在设置中填入你的 ntfy 访问密码
     "topic": "sms",
     "poll_interval": 3,
     "auto_start": False,
