@@ -1,9 +1,10 @@
 """
 Windows 通知模块 - ntfy-Notifier
 通知优先级：
-  1. winrt（Windows Toast 通知，静音）
-  2. win32gui.MessageBox（弹窗，有声音）
-  3. print stderr（后备）
+  1. winotify（WinRT Toast 通知，支持 AUMID 图标 + 声音）
+  2. plyer（Windows Toast 通知，无 AUMID 支持）
+  3. win32gui.MessageBox（弹窗，有声音）
+  4. print stderr（后备）
 
 订阅模式：SSE (Server-Sent Events) — 实时推送，无需轮询
 """
@@ -13,9 +14,18 @@ import json
 import traceback
 import threading
 import time
+import os
 from typing import Callable, Optional
 
 # ── 通知后端检测 ────────────────────────────────────────────────────────────
+
+_WINOTIFY_AVAILABLE = False
+try:
+    from winotify import Notification, audio as winotify_audio
+    _WINOTIFY_AVAILABLE = True
+except ImportError:
+    pass
+
 _WINRT_AVAILABLE = False
 try:
     from winrt.windows.ui.notifications import ToastNotificationManager, ToastNotification
@@ -42,8 +52,56 @@ _MB_ICONINFORMATION = 0x40
 _MB_OK = 0
 
 
-# ── Plyer Toast 实现 (推荐) ────────────────────────────────────────────────
-def _send_plyer_toast(title: str, message: str):
+def _get_icon_path() -> str:
+    """获取 connected.ico 的持久化路径（用于通知图标）。"""
+    if getattr(sys, 'frozen', False):
+        # 打包后：从 MEIPASS 临时目录复制到 %APPDATA% 持久目录
+        src = os.path.join(sys._MEIPASS, "connected.ico") if hasattr(sys, '_MEIPASS') else ""
+        if src and os.path.exists(src):
+            persistent_dir = os.path.join(os.environ.get('APPDATA', ''), 'ntfy-Notifier')
+            os.makedirs(persistent_dir, exist_ok=True)
+            dst = os.path.join(persistent_dir, 'connected.ico')
+            if not os.path.exists(dst):
+                import shutil
+                shutil.copy2(src, dst)
+            return dst
+        # 后备：exe 旁的图标
+        base = os.path.dirname(sys.executable)
+        fallback = os.path.join(base, "connected.ico")
+        if os.path.exists(fallback):
+            return fallback
+    else:
+        # 开发模式
+        base = os.path.dirname(os.path.abspath(__file__))
+        parent = os.path.dirname(base)
+        fallback = os.path.join(parent, "connected.ico")
+        if os.path.exists(fallback):
+            return fallback
+    return ""
+
+
+# ── winotify Toast 实现（首选，支持 AUMID + 图标）───────────────────────────
+def _send_winotify_toast(title: str, message: str, app_id: str = "ntfy-Notifier") -> bool:
+    """使用 winotify 发送 WinRT Toast 通知（通过 AUMID 显示应用图标）。"""
+    try:
+        icon_path = _get_icon_path()
+        toast = Notification(
+            app_id=app_id,
+            title=title,
+            msg=message,
+            icon=icon_path,
+            duration="short",
+        )
+        toast.set_audio(winotify_audio.Default, loop=False)
+        toast.show()
+        return True
+    except Exception:
+        traceback.print_exc()
+        return False
+
+
+# ── Plyer Toast 实现（后备，不支持 AUMID）─────────────────────────────────
+def _send_plyer_toast(title: str, message: str) -> bool:
     """使用 plyer 发送原生 Toast 通知。"""
     try:
         plyer_notify.notify(
@@ -78,16 +136,23 @@ def send_toast(title: str, message: str, app_id: str = "ntfy-Notifier") -> bool:
     """
     发送 Windows 通知。
 
-    优先级：Plyer → winrt Toast → win32gui MessageBox → print stderr
+    优先级：winotify → plyer → winrt Toast → win32gui MessageBox → print stderr
     """
-    # 方案 1：Plyer（跨平台，无需额外配置）
+    # 方案 1：winotify（WinRT Toast，支持 AUMID 图标）
+    if _WINOTIFY_AVAILABLE:
+        try:
+            return _send_winotify_toast(title, message, app_id)
+        except Exception:
+            pass
+
+    # 方案 2：plyer（跨平台，无 AUMID 支持，图标为默认）
     if _PLYER_AVAILABLE:
         try:
             return _send_plyer_toast(title, message)
         except Exception:
             pass
 
-    # 方案 2：winrt Toast（静默通知，Windows 10/11 原生样式）
+    # 方案 3：winrt Toast（静默通知，Windows 10/11 原生样式）
     if _WINRT_AVAILABLE:
         try:
             notifier = ToastNotificationManager.create_notifier(app_id)
@@ -97,7 +162,7 @@ def send_toast(title: str, message: str, app_id: str = "ntfy-Notifier") -> bool:
         except Exception:
             traceback.print_exc()
 
-    # 方案 3：win32gui 弹窗（有系统提示音）
+    # 方案 4：win32gui 弹窗（有系统提示音）
     if _WIN32GUI_AVAILABLE:
         try:
             win32gui.MessageBox(0, message, title, _MB_ICONINFORMATION | _MB_OK)
@@ -105,7 +170,7 @@ def send_toast(title: str, message: str, app_id: str = "ntfy-Notifier") -> bool:
         except Exception:
             traceback.print_exc()
 
-    # 方案 4：stderr 打印（仅调试用）
+    # 方案 5：stderr 打印（仅调试用）
     print(f"[ntfy-Notifier 通知] {title}: {message}", file=sys.stderr)
     return False
 
