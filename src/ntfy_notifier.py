@@ -10,6 +10,8 @@ import time
 import traceback
 from threading import Event
 
+import requests
+
 from src.config import load_config, save_config
 from src.notifier import fetch_ntfy_messages, send_toast
 from src.tray import TrayIcon
@@ -132,7 +134,7 @@ def _poll_loop():
                 _connected = False
                 if _tray:
                     _tray.update(False)
-            time.sleep(cfg.get("poll_interval", 3))
+            time.sleep(cfg.get("poll_interval", 60))
             continue
 
         try:
@@ -149,6 +151,13 @@ def _poll_loop():
                     title = msg.get("title") or "ntfy 消息"
                     message = msg.get("message") or str(msg)
                     send_toast(title, message, app_id="ntfy-Notifier")
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                print("[ntfy] ⚠️ 触发限流，等待 30 秒后重试...", file=sys.stderr)
+                time.sleep(30)
+            else:
+                traceback.print_exc()
+                time.sleep(cfg.get("poll_interval", 60))
         except Exception:
             if _connected:
                 _connected = False
@@ -156,7 +165,7 @@ def _poll_loop():
                     _tray.update(False)
             traceback.print_exc()
             # 避免异常后立即重试造成忙等
-            time.sleep(min(cfg.get("poll_interval", 3), 5))
+            time.sleep(min(cfg.get("poll_interval", 60), 5))
 
 
 if __name__ == "__main__":
