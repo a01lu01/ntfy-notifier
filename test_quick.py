@@ -12,7 +12,7 @@ def on_save(cfg):
     root.quit()
 
 win = SettingsWindow(
-    {"server": "http://", "username": "", "password": "", "topic": "mytopic", "poll_interval": 3, "auto_start": False},
+    {"server": "http://", "username": "", "password": "", "topic": "mytopic", "auto_start": False},
     on_save, None, root
 )
 win.show()
