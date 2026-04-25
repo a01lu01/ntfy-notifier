@@ -14,7 +14,6 @@ import json
 import traceback
 import threading
 import time
-import os
 from typing import Callable, Optional
 
 # ── 通知后端检测 ────────────────────────────────────────────────────────────
@@ -52,44 +51,15 @@ _MB_ICONINFORMATION = 0x40
 _MB_OK = 0
 
 
-def _get_icon_path() -> str:
-    """获取 connected.ico 的持久化路径（用于通知图标）。"""
-    if getattr(sys, 'frozen', False):
-        # 打包后：从 MEIPASS 临时目录复制到 %APPDATA% 持久目录
-        src = os.path.join(sys._MEIPASS, "connected.ico") if hasattr(sys, '_MEIPASS') else ""
-        if src and os.path.exists(src):
-            persistent_dir = os.path.join(os.environ.get('APPDATA', ''), 'ntfy-Notifier')
-            os.makedirs(persistent_dir, exist_ok=True)
-            dst = os.path.join(persistent_dir, 'connected.ico')
-            if not os.path.exists(dst):
-                import shutil
-                shutil.copy2(src, dst)
-            return dst
-        # 后备：exe 旁的图标
-        base = os.path.dirname(sys.executable)
-        fallback = os.path.join(base, "connected.ico")
-        if os.path.exists(fallback):
-            return fallback
-    else:
-        # 开发模式
-        base = os.path.dirname(os.path.abspath(__file__))
-        parent = os.path.dirname(base)
-        fallback = os.path.join(parent, "connected.ico")
-        if os.path.exists(fallback):
-            return fallback
-    return ""
-
-
-# ── winotify Toast 实现（首选，支持 AUMID + 图标）───────────────────────────
+# ── winotify Toast 实现（首选，支持 AUMID + 声音）─────────────────────────
 def _send_winotify_toast(title: str, message: str, app_id: str = "ntfy-Notifier") -> bool:
     """使用 winotify 发送 WinRT Toast 通知（通过 AUMID 显示应用图标）。"""
     try:
-        icon_path = _get_icon_path()
+        # 不传 icon，让通知中心使用默认图标
         toast = Notification(
             app_id=app_id,
             title=title,
             msg=message,
-            icon=icon_path,
             duration="short",
         )
         toast.set_audio(winotify_audio.Default, loop=False)
