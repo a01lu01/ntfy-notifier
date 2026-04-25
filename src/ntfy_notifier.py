@@ -80,6 +80,14 @@ def _open_settings_thread_safe():
         _root.after(0, _open_settings)
 
 
+def _quit_thread_safe():
+    """线程安全入口：pystray 退出回调，通过 after 切换到主 Tk 线程执行退出。"""
+    if _root is not None:
+        _root.after(0, _quit)
+    else:
+        _quit()
+
+
 def _on_ntfy_message(msg: dict):
     """处理 ntfy 消息（在 SSE 线程中执行）。"""
     global _connected
@@ -130,32 +138,34 @@ def _start_sse_subscription():
             _subscriber.stop()
         
         # 创建新的 SSE 订阅器
+        def on_connected():
+            """SSE 连接成功回调。"""
+            global _connected
+            _connected = True
+            if _tray:
+                _tray.update(True)
+            print("[ntfy] ✅ SSE 订阅已连接", file=sys.stderr)
+        
+        def on_disconnected():
+            """SSE 连接断开回调。"""
+            global _connected
+            _connected = False
+            if _tray:
+                _tray.update(False)
+            print("[ntfy] ⚠️ SSE 连接断开", file=sys.stderr)
+        
         _subscriber = NtfySSESubscriber(
             server=server,
             topic=topic,
             username=username,
             password=password,
             on_message=_on_ntfy_message,
+            on_connected=on_connected,
+            on_disconnected=on_disconnected,
         )
         
-        # 设置连接状态回调
-        original_start = _subscriber.start
-        
-        def wrapped_start():
-            global _connected
-            try:
-                original_start()
-                _connected = True
-                if _tray:
-                    _tray.update(True)
-            except Exception as e:
-                print(f"[ntfy] ⚠️ SSE 启动失败：{e}", file=sys.stderr)
-        
-        _subscriber.start = wrapped_start
-        
-        # 启动订阅
         _subscriber.start()
-        print("[ntfy] ✅ SSE 订阅已启动", file=sys.stderr)
+        print("[ntfy] SSE 订阅线程已启动", file=sys.stderr)
         
     except Exception as e:
         print(f"[ntfy] ⚠️ SSE 订阅失败：{e}", file=sys.stderr)
@@ -183,7 +193,7 @@ def main():
         _set_auto_start(True)
 
     # 启动托盘（此时 Tk 已在运行），使用线程安全入口
-    _tray = TrayIcon(on_settings=_open_settings_thread_safe, on_quit=_quit)
+    _tray = TrayIcon(on_settings=_open_settings_thread_safe, on_quit=_quit_thread_safe)
     _tray.start(connected=False)
 
     # 启动 SSE 订阅
