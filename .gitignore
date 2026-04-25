@@ -8,12 +8,23 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+*.egg
 .eggs/
 
 # IDE
 .idea/
 .vscode/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Local memory / workbuddy (personal workspace data)
+.workbuddy/
+
+# Test files
+test_*.py
+test_ui.py
