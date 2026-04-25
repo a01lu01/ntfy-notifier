@@ -51,6 +51,133 @@ def _set_auto_start(enabled: bool):
         traceback.print_exc()
 
 
+def _register_aumid():
+    """
+    注册 AUMID（App User Model ID），让 Windows 通知中心能显示应用图标。
+
+    原理：在开始菜单创建一个快捷方式（.lnk），设置其 AUMID，
+    Windows 通过 AUMID 匹配通知来源和图标。
+    只写当前用户（HKCU + Start Menu），不需要管理员权限。
+    """
+    try:
+        import os
+        import shutil
+        import winreg
+        import pythoncom
+        from win32com.shell import shell, shellcon
+
+        APP_ID = "ntfy-Notifier"
+        exe_path = sys.executable
+
+        # ── 图标持久化：复制到 %APPDATA%\ntfy-Notifier\ ──────────────────
+        # PyInstaller 打包后 sys._MEIPASS 是临时目录，退出即清理，
+        # Windows 通知中心需要持久的图标路径，所以复制到 AppData。
+        persistent_dir = os.path.join(
+            os.environ.get('APPDATA', ''), 'ntfy-Notifier'
+        )
+        os.makedirs(persistent_dir, exist_ok=True)
+        persistent_icon = os.path.join(persistent_dir, 'connected.ico')
+
+        # 查找源图标
+        src_icon = ""
+        if getattr(sys, 'frozen', False):
+            if hasattr(sys, '_MEIPASS'):
+                candidate = os.path.join(sys._MEIPASS, "connected.ico")
+                if os.path.exists(candidate):
+                    src_icon = candidate
+            if not src_icon:
+                candidate = os.path.join(os.path.dirname(exe_path), "connected.ico")
+                if os.path.exists(candidate):
+                    src_icon = candidate
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            candidate = os.path.join(os.path.dirname(base_dir), "connected.ico")
+            if os.path.exists(candidate):
+                src_icon = candidate
+
+        # 复制图标到持久目录（仅在文件不存在或大小不同时更新）
+        if src_icon:
+            need_copy = True
+            if os.path.exists(persistent_icon):
+                try:
+                    src_size = os.path.getsize(src_icon)
+                    dst_size = os.path.getsize(persistent_icon)
+                    need_copy = src_size != dst_size
+                except OSError:
+                    need_copy = True
+            if need_copy:
+                shutil.copy2(src_icon, persistent_icon)
+
+        icon_path = persistent_icon if os.path.exists(persistent_icon) else exe_path
+
+        # ── 创建开始菜单快捷方式 ────────────────────────────────────────
+        start_menu = shell.SHGetFolderPath(0, shellcon.CSIDL_STARTMENU, None, 0)
+        shortcut_dir = os.path.join(start_menu, "Programs")
+        os.makedirs(shortcut_dir, exist_ok=True)
+        shortcut_path = os.path.join(shortcut_dir, "ntfy-Notifier.lnk")
+
+        # 检查是否需要重建快捷方式
+        need_create = True
+        if os.path.exists(shortcut_path):
+            try:
+                existing = pythoncom.CoCreateInstance(
+                    shell.CLSID_ShellLink, None,
+                    pythoncom.CLSCTX_INPROC_SERVER, shell.IID_IShellLink
+                )
+                existing.QueryInterface(pythoncom.IID_IPersistFile).Load(shortcut_path)
+                existing_path = existing.GetPath(shell.SLGP_SHORTPATH)[0]
+                if os.path.normcase(existing_path) == os.path.normcase(exe_path):
+                    need_create = False
+            except Exception:
+                pass
+
+        if need_create:
+            shortcut = pythoncom.CoCreateInstance(
+                shell.CLSID_ShellLink, None,
+                pythoncom.CLSCTX_INPROC_SERVER, shell.IID_IShellLink
+            )
+            shortcut.SetPath(exe_path)
+            shortcut.SetIconLocation(icon_path, 0)
+            shortcut.SetDescription("ntfy-Notifier 通知工具")
+
+            # ── 设置 AUMID（关键步骤）─────────────────────────────────
+            # 使用 propsys.IID_IPropertyStore 获取属性存储接口，
+            # 然后设置 System.AppUserModel.ID 属性。
+            try:
+                from win32com.propsys import propsys
+                property_store = shortcut.QueryInterface(propsys.IID_IPropertyStore)
+                property_store.SetValue(
+                    propsys.PSGetPropertyKeyFromName("System.AppUserModel.ID"),
+                    propsys.PROPVARIANT(APP_ID)
+                )
+                property_store.Commit()
+                print(f"[ntfy] AUMID 已写入快捷方式: {APP_ID}", file=sys.stderr)
+            except Exception as e:
+                print(f"[ntfy] ⚠️ AUMID 写入失败: {e}", file=sys.stderr)
+
+            persist = shortcut.QueryInterface(pythoncom.IID_IPersistFile)
+            persist.Save(shortcut_path, True)
+            print(f"[ntfy] 开始菜单快捷方式已创建: {shortcut_path}", file=sys.stderr)
+
+        # ── 注册 AUMID 到注册表 ────────────────────────────────────────
+        try:
+            key = winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER,
+                rf"Software\Classes\AppUserModelId\{APP_ID}",
+                0, winreg.KEY_SET_VALUE,
+            )
+            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "ntfy-Notifier")
+            winreg.SetValueEx(key, "IconUri", 0, winreg.REG_SZ, icon_path)
+            winreg.CloseKey(key)
+            print(f"[ntfy] AUMID 已注册到注册表: {APP_ID}", file=sys.stderr)
+        except Exception as e:
+            print(f"[ntfy] ⚠️ AUMID 注册表写入失败: {e}", file=sys.stderr)
+
+    except Exception as e:
+        # AUMID 注册失败不影响通知发送，只是图标显示为默认
+        print(f"[ntfy] ⚠️ AUMID 注册失败: {e}", file=sys.stderr)
+
+
 def _open_settings():
     """在主 Tk 线程中弹出设置窗口（通过 after 调度，避免 pystray 子线程操作 Tk）。"""
     if _root is None:
@@ -183,6 +310,9 @@ def main():
     import tkinter as tk
 
     _config, is_first_run = load_config()
+
+    # 注册 AUMID（让通知中心显示铃铛图标）
+    _register_aumid()
 
     # 单例 Tk root（始终存在，隐藏）
     _root = tk.Tk()
