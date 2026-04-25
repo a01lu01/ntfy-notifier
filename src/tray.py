@@ -1,21 +1,34 @@
 """
 系统托盘模块 - ntfy-Notifier
 使用 pystray 实现托盘图标（兼容 Windows/macOS/Linux）
-pystray 内置处理线程调度，不存在 Tk/Win32 消息循环冲突
+支持连接/断开状态切换不同图标
 """
 
+import os
 import threading
 from typing import Callable, Optional
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
-# ── 图标生成 ────────────────────────────────────────────────────────────────
-def _create_icon_image() -> Image:
-    """用 Pillow 画一个蓝色圆形图标（32x32）。"""
+# ── 图标路径 ────────────────────────────────────────────────────────────────
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_Parent_DIR = os.path.dirname(_DIR)
+_ICON_CONNECTED = os.path.join(_Parent_DIR, "connected.ico")
+_ICON_DISCONNECTED = os.path.join(_Parent_DIR, "disconnected.ico")
+
+
+def _load_icon(connected: bool) -> Image:
+    """加载对应状态的托盘图标。"""
+    path = _ICON_CONNECTED if connected else _ICON_DISCONNECTED
+    if os.path.exists(path):
+        return Image.open(path)
+    # 后备：用 Pillow 画一个简单圆形
     size = 32
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    from PIL import ImageDraw
     draw = ImageDraw.Draw(img)
-    draw.ellipse([2, 2, size - 3, size - 3], fill=(0, 120, 212, 255))  # #0078D4
+    color = (26, 250, 41, 255) if connected else (216, 30, 6, 255)
+    draw.ellipse([2, 2, size - 3, size - 3], fill=color)
     return img
 
 
@@ -44,8 +57,9 @@ class TrayIcon:
                  on_quit: Optional[Callable] = None):
         self._on_settings = on_settings
         self._on_quit = on_quit
-        self._icon: Optional[pystray.Icon] = None
+        self._icon: Optional["pystray.Icon"] = None
         self._thread: Optional[threading.Thread] = None
+        self._connected = False
 
     # ── 生命周期 ─────────────────────────────────────────────────────────────
 
@@ -54,7 +68,8 @@ class TrayIcon:
         import pystray
 
         try:
-            icon_image = _create_icon_image()
+            self._connected = connected
+            icon_image = _load_icon(connected)
             menu = _make_menu(self._on_settings, self._on_quit)
 
             self._icon = pystray.Icon(
@@ -64,7 +79,6 @@ class TrayIcon:
                 menu,
             )
 
-            # 在守护线程中运行 pystray 事件循环，与 Tk mainloop 完全独立
             self._thread = threading.Thread(
                 target=self._icon.run,
                 daemon=True,
@@ -76,9 +90,16 @@ class TrayIcon:
             return False
 
     def update(self, connected: bool):
-        """更新托盘状态（预留，未来可改图标颜色）。"""
-        # TODO: 连接/断开时切换不同图标
-        pass
+        """更新托盘图标和提示文字。"""
+        self._connected = connected
+        if self._icon:
+            try:
+                icon_img = _load_icon(connected)
+                tip = "ntfy-Notifier · 已连接" if connected else "ntfy-Notifier · 未连接"
+                self._icon.icon = icon_img
+                self._icon.title = tip
+            except Exception:
+                pass
 
     def stop(self):
         """安全停止托盘图标。"""

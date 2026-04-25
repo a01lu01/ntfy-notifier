@@ -64,10 +64,15 @@ def _open_settings():
         _set_auto_start(cfg.get("auto_start", False))
         
         # 重新连接 SSE（如果之前有连接）
+        # 在后台线程中执行 stop + restart，避免 join 阻塞 Tk 主线程
         if _subscriber and _connected:
-            print("[ntfy] 配置已更新，重新连接 SSE...", file=sys.stderr)
-            _subscriber.stop()
-            _start_sse_subscription()
+            print("[ntfy] 配置已更新，后台重连 SSE...", file=sys.stderr)
+            
+            def _reconnect():
+                _subscriber.stop()
+                _start_sse_subscription()
+            
+            threading.Thread(target=_reconnect, daemon=True).start()
 
     from src.ui import SettingsWindow
     win = SettingsWindow(_config, on_save=on_save, on_cancel=None, master=_root)

@@ -16,8 +16,17 @@ _FLUENT_SURFACE       = "#F3F3F3"
 _FLUENT_BORDER        = "#E0E0E0"
 _FLUENT_TEXT          = "#1A1A1A"
 _FLUENT_SUBTEXT       = "#606060"
+_FLUENT_PLACEHOLDER   = "#999999"
 _FLUENT_ACCENT        = "#0078D4"
 _FLUENT_ACCENT_HOVER  = "#106EBE"
+_FLUENT_DANGER        = "#C42B1C"
+_FLUENT_INPUT_BG      = "#FFFFFF"
+_FLUENT_INPUT_BORDER  = "#CCCCCC"
+_FLUENT_INPUT_FOCUS   = "#0078D4"
+
+# 窗口尺寸
+_WIN_W = 460
+_WIN_H = 440
 
 
 class SettingsWindow:
@@ -42,12 +51,12 @@ class SettingsWindow:
         self._entries: dict[str, tk.Entry] = {}
         self._var_auto_start = tk.BooleanVar(value=False)
         self._closed = False
+        self._pwd_visible = False
+
+    # ── 公开接口 ─────────────────────────────────────────────────────────────
 
     def show(self):
-        """
-        非阻塞：在 _master 上显示设置窗口。
-        如果没有 master，则创建新的 Tk() 并驱动事件循环。
-        """
+        """非阻塞：在 _master 上显示设置窗口。"""
         root = self._master or tk.Tk()
         if not self._master:
             root.withdraw()
@@ -55,49 +64,23 @@ class SettingsWindow:
         win = tk.Toplevel(root)
         self._win = win
         win.title("ntfy-Notifier 设置")
-        win.geometry("480x520")
+        win.geometry(f"{_WIN_W}x{_WIN_H}")
         win.resizable(False, False)
         win.configure(bg=_FLUENT_BG)
 
-        # ── 标题区 ────────────────────────────────────────────────────────
-        self._build_header(win)
-
-        # ── 表单区 ────────────────────────────────────────────────────────
-        form_frame = tk.Frame(win, bg=_FLUENT_BG)
-        form_frame.pack(fill="x", padx=32, pady=(0, 16))
-
-        self._build_field(form_frame, "服务器地址 (Server)", "server", row=0)
-        self._build_field(form_frame, "用户名 (Username)", "username", row=1)
-        self._build_password_field(form_frame, "密码 (Password)", "password", row=2)
-        self._build_field(form_frame, "主题 (Topic)", "topic", row=3)
-
-        # ── 开机自启 ──────────────────────────────────────────────────────
-        startup_frame = tk.Frame(win, bg=_FLUENT_BG)
-        startup_frame.pack(fill="x", padx=32, pady=(8, 0))
-
-        self._var_auto_start.set(self._current.get("auto_start", False))
-        cb = ttk.Checkbutton(
-            startup_frame,
-            text="开机自启动 (Auto Start)",
-            variable=self._var_auto_start,
-            command=self._on_startup_toggle,
-        )
-        cb.pack(anchor="w")
-
-        # ── 底部按钮 ──────────────────────────────────────────────────────
+        # ★ 关键：先 pack 底部 footer，再 pack 上方内容，确保按钮永远可见
         self._build_footer(win)
+        self._build_content(win)
 
         win.protocol("WM_DELETE_WINDOW", self._cancel)
 
-        # 居中并显示
+        # 居中
         win.update_idletasks()
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        win.geometry(f"480x520+{(sw - 480) // 2}+{(sh - 520) // 2}")
-        win.update()
+        win.geometry(f"{_WIN_W}x{_WIN_H}+{(sw - _WIN_W) // 2}+{(sh - _WIN_H) // 2}")
         win.deiconify()
         win.after(0, lambda: (win.lift(), win.focus_force()))
 
-        # 无 master 时在调用线程中驱动 Tk 事件循环
         if not self._master:
             while not self._closed and win.winfo_exists():
                 win.update()
@@ -109,125 +92,165 @@ class SettingsWindow:
 
     # ── UI 构建 ─────────────────────────────────────────────────────────────
 
-    def _build_header(self, parent: tk.Widget):
-        frame = tk.Frame(parent, bg=_FLUENT_BG, padx=32, pady=24)
-        frame.pack(fill="x")
+    def _build_content(self, parent: tk.Widget):
+        """构建标题 + 表单 + 开机自启区域。"""
+        content = tk.Frame(parent, bg=_FLUENT_BG)
+        content.pack(fill="both", expand=True, padx=32, pady=(20, 0))
 
-        title_label = tk.Label(
-            frame,
-            text="⚙️  设置",
-            font=("Segoe UI", 18, "bold"),
-            fg=_FLUENT_TEXT,
-            bg=_FLUENT_BG,
-            anchor="w",
+        # ── 标题 ──
+        tk.Label(
+            content, text="设置", font=("Segoe UI", 16, "bold"),
+            fg=_FLUENT_TEXT, bg=_FLUENT_BG, anchor="w",
+        ).pack(anchor="w")
+
+        tk.Label(
+            content, text="配置 ntfy-Notifier 连接参数", font=("Segoe UI", 9),
+            fg=_FLUENT_SUBTEXT, bg=_FLUENT_BG, anchor="w",
+        ).pack(anchor="w", pady=(2, 16))
+
+        # ── 表单字段（上下排列：标签在上，输入框在下）──
+        self._build_input_block(content, "服务器地址", "server", placeholder="http://...")
+
+        # 密码字段行：用户名 + 密码并排
+        pair = tk.Frame(content, bg=_FLUENT_BG)
+        pair.pack(fill="x", pady=(0, 0))
+        pair.columnconfigure(0, weight=1)
+        pair.columnconfigure(1, weight=1)
+
+        left = tk.Frame(pair, bg=_FLUENT_BG)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self._build_input_block(left, "用户名", "username")
+
+        right = tk.Frame(pair, bg=_FLUENT_BG)
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        self._build_input_block(right, "密码", "password", is_password=True)
+
+        self._build_input_block(content, "主题", "topic", placeholder="sms")
+
+        # ── 开机自启 ──
+        self._var_auto_start.set(self._current.get("auto_start", False))
+        cb = tk.Checkbutton(
+            content,
+            text="  开机自启动",
+            font=("Segoe UI", 9),
+            variable=self._var_auto_start,
+            bg=_FLUENT_BG, fg=_FLUENT_TEXT,
+            activebackground=_FLUENT_BG, activeforeground=_FLUENT_TEXT,
+            selectcolor=_FLUENT_BG,
+            cursor="hand2",
         )
-        title_label.pack(anchor="w")
+        cb.pack(anchor="w", pady=(8, 0))
 
-        subtitle = tk.Label(
-            frame,
-            text="配置 ntfy-Notifier 连接参数",
+    def _build_input_block(
+        self, parent: tk.Widget, label: str, key: str,
+        *, is_password: bool = False, placeholder: str = "",
+    ):
+        """构建标签 + 输入框的纵向块（密码框带独立的眼睛按钮）。"""
+        block = tk.Frame(parent, bg=_FLUENT_BG)
+        block.pack(fill="x", pady=(0, 10))
+
+        # 标签
+        tk.Label(
+            block, text=label, font=("Segoe UI", 9),
+            fg=_FLUENT_SUBTEXT, bg=_FLUENT_BG, anchor="w",
+        ).pack(anchor="w")
+
+        # 输入行
+        input_row = tk.Frame(block, bg=_FLUENT_INPUT_BORDER, bd=0)
+        input_row.pack(fill="x", pady=(4, 0))
+
+        # 带边框效果的外框
+        border_canvas = tk.Frame(
+            input_row, bg=_FLUENT_INPUT_BORDER, padx=1, pady=1,
+        )
+        border_canvas.pack(fill="x")
+
+        inner = tk.Frame(border_canvas, bg=_FLUENT_INPUT_BG)
+        inner.pack(fill="x")
+
+        # Entry
+        entry_kw = dict(
             font=("Segoe UI", 10),
-            fg=_FLUENT_SUBTEXT,
-            bg=_FLUENT_BG,
-            anchor="w",
-        )
-        subtitle.pack(anchor="w", pady=(4, 0))
-
-    def _build_field(self, parent: tk.Widget, label_text: str, config_key: str, row: int):
-        """构建单行输入字段（标签 + Entry）。"""
-        row_frame = tk.Frame(parent, bg=_FLUENT_BG)
-        row_frame.pack(fill="x", pady=(8 if row > 0 else 0, 4))
-
-        lbl = tk.Label(
-            row_frame, text=label_text, font=("Segoe UI", 9),
-            fg=_FLUENT_TEXT, bg=_FLUENT_BG, anchor="w", width=16,
-        )
-        lbl.pack(side="left")
-
-        entry = tk.Entry(
-            row_frame, font=("Segoe UI", 9),
-            bd=1, relief="solid", bg="#FAFAFA", fg=_FLUENT_TEXT,
+            bg=_FLUENT_INPUT_BG, fg=_FLUENT_TEXT,
+            insertbackground=_FLUENT_TEXT,
+            bd=0, relief="flat",
             highlightthickness=0,
         )
-        entry.pack(side="right", fill="x", expand=True, padx=(8, 0))
-        entry.insert(0, self._current.get(config_key, ""))
-        self._entries[config_key] = entry
+        if is_password:
+            entry_kw["show"] = "•"
 
-    def _build_password_field(self, parent: tk.Widget, label_text: str, config_key: str, row: int):
-        """构建密码输入字段（带显示/隐藏切换按钮）。"""
-        row_frame = tk.Frame(parent, bg=_FLUENT_BG)
-        row_frame.pack(fill="x", pady=(8 if row > 0 else 0, 4))
+        entry = tk.Entry(inner, **entry_kw)
+        entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(8, 0))
+        entry.insert(0, self._current.get(key, ""))
+        self._entries[key] = entry
 
-        lbl = tk.Label(
-            row_frame, text=label_text, font=("Segoe UI", 9),
-            fg=_FLUENT_TEXT, bg=_FLUENT_BG, anchor="w", width=16,
-        )
-        lbl.pack(side="left")
+        # 密码切换按钮：独立在 Entry 右侧，不挤占输入框
+        if is_password:
+            eye_btn = tk.Label(
+                inner, text="👁", font=("Segoe UI Emoji", 10),
+                bg=_FLUENT_INPUT_BG, fg=_FLUENT_SUBTEXT,
+                cursor="hand2",
+            )
+            eye_btn.pack(side="right", padx=(4, 6), pady=4)
+            # 绑定点击
+            eye_btn.bind("<Button-1>", lambda _e: self._toggle_password(entry, eye_btn))
+            # hover 效果
+            eye_btn.bind("<Enter>", lambda _e: eye_btn.config(fg=_FLUENT_ACCENT))
+            eye_btn.bind("<Leave>", lambda _e: eye_btn.config(fg=_FLUENT_SUBTEXT))
 
-        # Entry + 眼睛按钮容器
-        inner = tk.Frame(row_frame, bg=_FLUENT_BG)
-        inner.pack(side="right", fill="x", expand=True, padx=(8, 0))
+        # 焦点高亮
+        def _on_focus_in(_e, e=entry, bc=border_canvas):
+            bc.config(bg=_FLUENT_INPUT_FOCUS)
 
-        entry = tk.Entry(
-            inner, font=("Segoe UI", 9), show="•",
-            bd=1, relief="solid", bg="#FAFAFA", fg=_FLUENT_TEXT,
-            highlightthickness=0, width=20,
-        )
-        entry.pack(side="left", fill="x", expand=True)
-        self._entries[config_key] = entry
+        def _on_focus_out(_e, e=entry, bc=border_canvas):
+            bc.config(bg=_FLUENT_INPUT_BORDER)
 
-        # 眼睛切换按钮
-        self._pwd_visible = False
-        eye_btn = tk.Button(
-            inner, text="👁️", font=("Segoe UI", 8),
-            bg=_FLUENT_BG, fg=_FLUENT_SUBTEXT, bd=0, cursor="hand2",
-            width=2, padx=4,
-            command=lambda: self._toggle_password_visibility(entry),
-        )
-        eye_btn.pack(side="right")
+        entry.bind("<FocusIn>", _on_focus_in)
+        entry.bind("<FocusOut>", _on_focus_out)
 
-    def _toggle_password_visibility(self, entry: tk.Entry):
+    def _toggle_password(self, entry: tk.Entry, eye_btn: tk.Label):
         """切换密码可见性。"""
         if self._pwd_visible:
             entry.config(show="•")
+            eye_btn.config(text="👁")
             self._pwd_visible = False
         else:
             entry.config(show="")
+            eye_btn.config(text="👁‍🗨")
             self._pwd_visible = True
 
     def _build_footer(self, parent: tk.Widget):
-        """构建底部按钮栏。"""
-        footer_frame = tk.Frame(parent, bg=_FLUENT_BG)
-        footer_frame.pack(fill="x", padx=32, pady=(16, 24))
+        """构建底部按钮栏（pack(side=BOTTOM) 确保永远可见）。"""
+        footer = tk.Frame(parent, bg=_FLUENT_BG)
+        footer.pack(side="bottom", fill="x")
 
         # 分隔线
-        sep = tk.Frame(footer_frame, height=1, bg=_FLUENT_BORDER)
-        sep.pack(fill="x", pady=(0, 12))
+        tk.Frame(footer, height=1, bg=_FLUENT_BORDER).pack(fill="x")
 
-        btn_frame = tk.Frame(footer_frame, bg=_FLUENT_BG)
-        btn_frame.pack(fill="x")
+        btn_row = tk.Frame(footer, bg=_FLUENT_BG)
+        btn_row.pack(fill="x", padx=32, pady=(12, 20))
+
+        # 保存按钮
+        save_btn = tk.Button(
+            btn_row, text="  保存  ", font=("Segoe UI", 9, "bold"),
+            fg="#FFFFFF", bg=_FLUENT_ACCENT,
+            activeforeground="#FFFFFF", activebackground=_FLUENT_ACCENT_HOVER,
+            bd=0, cursor="hand2", relief="flat",
+            command=self._save,
+        )
+        save_btn.pack(side="right", ipady=4)
 
         # 取消按钮
         cancel_btn = tk.Button(
-            btn_frame, text="取消", font=("Segoe UI", 9),
-            fg=_FLUENT_TEXT, bg="transparent", bd=0, cursor="hand2",
-            width=10, command=self._cancel,
+            btn_row, text="  取消  ", font=("Segoe UI", 9),
+            fg=_FLUENT_TEXT, bg=_FLUENT_SURFACE,
+            activeforeground=_FLUENT_TEXT, activebackground=_FLUENT_BORDER,
+            bd=0, cursor="hand2", relief="flat",
+            command=self._cancel,
         )
-        cancel_btn.pack(side="right", padx=(8, 0))
-
-        # 保存按钮（Accent 色）
-        save_btn = tk.Button(
-            btn_frame, text="保存", font=("Segoe UI", 9, "bold"),
-            fg="#FFFFFF", bg=_FLUENT_ACCENT, bd=0, cursor="hand2",
-            width=10, command=self._save,
-        )
-        save_btn.pack(side="right")
+        cancel_btn.pack(side="right", padx=(0, 10), ipady=4)
 
     # ── 交互逻辑 ────────────────────────────────────────────────────────────
-
-    def _on_startup_toggle(self):
-        """开机自启复选框切换回调。"""
-        pass  # 保存时统一处理
 
     def _collect_config(self) -> dict:
         """从表单收集当前配置值。"""
@@ -243,7 +266,6 @@ class SettingsWindow:
         try:
             self._on_save(cfg)
         except Exception as e:
-            # 简单错误提示（不阻塞）
             print(f"[ntfy] 保存失败: {e}", file=sys.stderr)
         finally:
             self._close()
