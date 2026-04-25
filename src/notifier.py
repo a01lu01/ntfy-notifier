@@ -94,14 +94,35 @@ def fetch_ntfy_messages(server: str, topic: str,
     """
     import requests
 
-    url = f"{server.rstrip('/')}/{topic}/json?since=10m"
+    # ntfy /{topic}/json 端点默认触发长轮询（挂起连接等待新消息）。
+    # 使用 poll=1 强制立即返回缓存消息并关闭连接，适合定时轮询模式。
+    url = f"{server.rstrip('/')}/{topic}/json?poll=1&since=10m"
     auth = (username, password) if username else None
 
+    # 绕过系统代理（避免 Clash/Mihomo 等代理导致请求超时）
+    proxies = {"http": None, "https": None}
+
     try:
-        resp = requests.get(url, auth=auth, timeout=10)
+        resp = requests.get(
+            url,
+            auth=auth,
+            timeout=(5, 10),       # (连接超时，读取超时)
+            proxies=proxies,
+            headers={"Accept": "application/json"},
+        )
+        print(f"[ntfy] 请求: {url}, HTTP {resp.status_code}", file=sys.stderr)
+        if resp.status_code == 401:
+            print("[ntfy] ⚠️ 认证失败！请检查用户名和密码", file=sys.stderr)
+        elif resp.status_code >= 400:
+            print(f"[ntfy] ⚠️ HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
         resp.raise_for_status()
         text = resp.text.strip()
         return json.loads(text) if text.startswith("[") else []
-    except Exception:
+    except requests.exceptions.Timeout:
+        print(f"[ntfy] ⚠️ 请求超时，请检查服务器地址是否可访问", file=sys.stderr)
+        traceback.print_exc()
+        return []
+    except Exception as e:
+        print(f"[ntfy] ⚠️ 错误: {type(e).__name__}: {e}", file=sys.stderr)
         traceback.print_exc()
         return []
