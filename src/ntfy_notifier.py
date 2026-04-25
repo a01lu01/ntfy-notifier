@@ -47,7 +47,7 @@ def _set_auto_start(enabled: bool):
 
 
 def _open_settings():
-    """在主 Tk 线程中弹出设置窗口（通过 after 调度）。"""
+    """在主 Tk 线程中弹出设置窗口（通过 after 调度，避免 pystray 子线程操作 Tk）。"""
     if _root is None:
         return
 
@@ -60,6 +60,12 @@ def _open_settings():
     from src.ui import SettingsWindow
     win = SettingsWindow(_config, on_save=on_save, on_cancel=None, master=_root)
     win.show()
+
+
+def _open_settings_thread_safe():
+    """线程安全入口：pystray 回调调用此函数，内部通过 after 切换到主 Tk 线程。"""
+    if _root is not None:
+        _root.after(0, _open_settings)
 
 
 def main():
@@ -75,15 +81,15 @@ def main():
     # 拦截关闭，防止 root 被意外销毁
     _root.protocol("WM_DELETE_WINDOW", lambda: None)
 
-    # 首次运行 → 在 mainloop 启动后立即弹出设置窗口
+    # 首次运行 → 在 mainloop 启动后立即弹出设置窗口（已在 Tk 线程，无需 after）
     if is_first_run:
         _root.after(200, _open_settings)
 
     if _config.get("auto_start"):
         _set_auto_start(True)
 
-    # 启动托盘（此时 Tk 已在运行）
-    _tray = TrayIcon(on_settings=_open_settings, on_quit=_quit)
+    # 启动托盘（此时 Tk 已在运行），使用线程安全入口
+    _tray = TrayIcon(on_settings=_open_settings_thread_safe, on_quit=_quit)
     _tray.start(connected=False)
 
     # 启动轮询线程

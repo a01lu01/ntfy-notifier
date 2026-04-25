@@ -94,7 +94,7 @@ def fetch_ntfy_messages(server: str, topic: str,
     """
     import requests
 
-    url = f"{server.rstrip('/')}/{topic}/json"
+    url = f"{server.rstrip('/')}/{topic}/json?since=10m"
     auth = (username, password) if username else None
 
     try:
