@@ -2,27 +2,30 @@
 ntfy-Notifier 主程序
 监听 ntfy 消息并弹出 Windows 原生通知
 遵循 Fluent Design 视觉风格
+
+订阅模式：SSE (Server-Sent Events) — 实时推送，无需轮询
 """
 
 import sys
 import threading
 import time
 import traceback
+from typing import Optional
 from threading import Event
 
 import requests
 
 from src.config import load_config, save_config
-from src.notifier import fetch_ntfy_messages, send_toast
+from src.notifier import send_toast, NtfySSESubscriber
 from src.tray import TrayIcon
 
 # ── 全局状态 ────────────────────────────────────────────────────────────────
 
 _config = {}
-_polling_thread: threading.Thread | None = None
+_subscriber: Optional[NtfySSESubscriber] = None
 _running = True
 _connected = False
-_tray: TrayIcon | None = None
+_tray: Optional[TrayIcon] = None
 _root: "tk.Tk | None" = None
 
 
@@ -54,10 +57,17 @@ def _open_settings():
         return
 
     def on_save(cfg: dict):
-        global _config
+        global _config, _subscriber
+        
         save_config(cfg)
         _config = cfg
         _set_auto_start(cfg.get("auto_start", False))
+        
+        # 重新连接 SSE（如果之前有连接）
+        if _subscriber and _connected:
+            print("[ntfy] 配置已更新，重新连接 SSE...", file=sys.stderr)
+            _subscriber.stop()
+            _start_sse_subscription()
 
     from src.ui import SettingsWindow
     win = SettingsWindow(_config, on_save=on_save, on_cancel=None, master=_root)
@@ -68,6 +78,88 @@ def _open_settings_thread_safe():
     """线程安全入口：pystray 回调调用此函数，内部通过 after 切换到主 Tk 线程。"""
     if _root is not None:
         _root.after(0, _open_settings)
+
+
+def _on_ntfy_message(msg: dict):
+    """处理 ntfy 消息（在 SSE 线程中执行）。"""
+    global _connected
+    
+    msg_id = str(msg.get("id", ""))
+    if not msg_id:
+        return
+    
+    # 检查是否已处理过（避免重复通知）
+    if hasattr(_on_ntfy_message, 'seen_ids'):
+        seen_ids = _on_ntfy_message.seen_ids
+    else:
+        seen_ids = set()
+        _on_ntfy_message.seen_ids = seen_ids
+    
+    # 清理旧 ID（保留最近 1000 条）
+    if len(seen_ids) > 1000:
+        seen_ids.clear()
+    
+    if msg_id in seen_ids:
+        return
+    
+    seen_ids.add(msg_id)
+    
+    title = msg.get("title") or "ntfy 消息"
+    message = msg.get("message") or str(msg)
+    
+    print(f"[ntfy] 收到新消息：{title}", file=sys.stderr)
+    send_toast(title, message, app_id="ntfy-Notifier")
+
+
+def _start_sse_subscription():
+    """启动 SSE 订阅。"""
+    global _subscriber, _connected
+    
+    cfg = _config
+    server = cfg.get("server", "")
+    topic = cfg.get("topic", "")
+    username = cfg.get("username", "")
+    password = cfg.get("password", "")
+    
+    if not server or not topic:
+        return
+    
+    try:
+        # 停止旧的订阅
+        if _subscriber:
+            _subscriber.stop()
+        
+        # 创建新的 SSE 订阅器
+        _subscriber = NtfySSESubscriber(
+            server=server,
+            topic=topic,
+            username=username,
+            password=password,
+            on_message=_on_ntfy_message,
+        )
+        
+        # 设置连接状态回调
+        original_start = _subscriber.start
+        
+        def wrapped_start():
+            global _connected
+            try:
+                original_start()
+                _connected = True
+                if _tray:
+                    _tray.update(True)
+            except Exception as e:
+                print(f"[ntfy] ⚠️ SSE 启动失败：{e}", file=sys.stderr)
+        
+        _subscriber.start = wrapped_start
+        
+        # 启动订阅
+        _subscriber.start()
+        print("[ntfy] ✅ SSE 订阅已启动", file=sys.stderr)
+        
+    except Exception as e:
+        print(f"[ntfy] ⚠️ SSE 订阅失败：{e}", file=sys.stderr)
+        traceback.print_exc()
 
 
 def main():
@@ -94,9 +186,8 @@ def main():
     _tray = TrayIcon(on_settings=_open_settings_thread_safe, on_quit=_quit)
     _tray.start(connected=False)
 
-    # 启动轮询线程
-    _polling_thread = threading.Thread(target=_poll_loop, daemon=True, name="PollThread")
-    _polling_thread.start()
+    # 启动 SSE 订阅
+    _start_sse_subscription()
 
     # 主 Tk 线程：永不退出
     _root.mainloop()
@@ -104,68 +195,24 @@ def main():
 
 
 def _quit():
-    global _running, _tray
+    global _running, _subscriber, _tray
     _running = False
+    
+    if _subscriber:
+        print("[ntfy] 正在关闭 SSE 订阅...", file=sys.stderr)
+        _subscriber.stop()
+    
     if _tray:
         _tray.stop()
+    
     if _root:
         try:
             _root.quit()
             _root.destroy()
         except Exception:
             pass
+    
     sys.exit(0)
-
-
-def _poll_loop():
-    global _connected, _running, _config, _tray
-
-    seen_ids: set[str] = set()
-
-    while _running:
-        cfg = _config
-        server = cfg.get("server", "")
-        topic = cfg.get("topic", "")
-        username = cfg.get("username", "")
-        password = cfg.get("password", "")
-
-        if not server or not topic:
-            if _connected:
-                _connected = False
-                if _tray:
-                    _tray.update(False)
-            time.sleep(cfg.get("poll_interval", 60))
-            continue
-
-        try:
-            messages = fetch_ntfy_messages(server, topic, username, password)
-            if not _connected:
-                _connected = True
-                if _tray:
-                    _tray.update(True)
-
-            for msg in messages:
-                msg_id = str(msg.get("id", msg.get("time", "")))
-                if msg_id not in seen_ids:
-                    seen_ids.add(msg_id)
-                    title = msg.get("title") or "ntfy 消息"
-                    message = msg.get("message") or str(msg)
-                    send_toast(title, message, app_id="ntfy-Notifier")
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                print("[ntfy] ⚠️ 触发限流，等待 30 秒后重试...", file=sys.stderr)
-                time.sleep(30)
-            else:
-                traceback.print_exc()
-                time.sleep(cfg.get("poll_interval", 60))
-        except Exception:
-            if _connected:
-                _connected = False
-                if _tray:
-                    _tray.update(False)
-            traceback.print_exc()
-            # 避免异常后立即重试造成忙等
-            time.sleep(min(cfg.get("poll_interval", 60), 5))
 
 
 if __name__ == "__main__":
