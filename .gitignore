@@ -28,3 +28,7 @@ desktop.ini
 # Test files
 test_*.py
 test_ui.py
+
+# Debug scripts
+analyze_svg.py
+debug_path.py
