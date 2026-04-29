@@ -141,6 +141,20 @@ class SettingsWindow:
         )
         cb.pack(anchor="w", pady=(8, 0))
 
+        # ── 自动复制验证码 ──
+        self._var_auto_copy_otp = tk.BooleanVar(value=self._current.get("auto_copy_otp", False))
+        cb_otp = tk.Checkbutton(
+            content,
+            text="  收到短信时自动复制验证码到剪切板",
+            font=("Segoe UI", 9),
+            variable=self._var_auto_copy_otp,
+            bg=_FLUENT_BG, fg=_FLUENT_TEXT,
+            activebackground=_FLUENT_BG, activeforeground=_FLUENT_TEXT,
+            selectcolor=_FLUENT_BG,
+            cursor="hand2",
+        )
+        cb_otp.pack(anchor="w", pady=(8, 0))
+
     def _build_input_block(
         self, parent: tk.Widget, label: str, key: str,
         *, is_password: bool = False, placeholder: str = "",
@@ -258,6 +272,7 @@ class SettingsWindow:
         for key, entry in self._entries.items():
             cfg[key] = entry.get()
         cfg["auto_start"] = bool(self._var_auto_start.get())
+        cfg["auto_copy_otp"] = bool(self._var_auto_copy_otp.get())
         return cfg
 
     def _save(self):
@@ -294,6 +309,7 @@ if __name__ == "__main__":
         "password": "",
         "topic": "sms",
         "auto_start": False,
+        "auto_copy_otp": False,
     }
 
     def on_save(cfg):

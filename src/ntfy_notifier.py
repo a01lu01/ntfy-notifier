@@ -248,7 +248,10 @@ def _on_ntfy_message(msg: dict):
     message = msg.get("message") or str(msg)
     
     print(f"[ntfy] 收到新消息：{title}", file=sys.stderr)
-    send_toast(title, message, app_id="ntfy-Notifier")
+    
+    # 读取自动复制验证码开关
+    auto_copy_otp = _config.get("auto_copy_otp", False)
+    send_toast(title, message, app_id="ntfy-Notifier", auto_copy_otp=auto_copy_otp)
 
 
 def _start_sse_subscription():

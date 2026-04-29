@@ -11,10 +11,49 @@ Windows 通知模块 - ntfy-Notifier
 
 import sys
 import json
+import re
 import traceback
 import threading
 import time
 from typing import Callable, Optional
+
+# ── 剪切板模块（Windows win32clipboard，线程安全）──────────────────────────
+import threading as _threading
+
+try:
+    import win32clipboard
+    _CLIPBOARD_AVAILABLE = True
+except ImportError:
+    _CLIPBOARD_AVAILABLE = False
+
+
+def _extract_otp(text: str) -> Optional[str]:
+    """从消息文本中提取验证码（4-8 位字母数字组合）。"""
+    # 匹配独立的 4-8 位字母数字序列（前后为空格、标点或边界）
+    match = re.search(r'(?<![A-Za-z0-9])([A-Za-z0-9]{4,8})(?![A-Za-z0-9])', text)
+    return match.group(1) if match else None
+
+
+def _copy_to_clipboard(text: str):
+    """将文本复制到系统剪切板（使用 win32clipboard，线程安全）。"""
+    if not _CLIPBOARD_AVAILABLE:
+        return
+    # 在子线程里调用 win32clipboard 需要先初始化 COM
+    import ctypes
+    ctypes.windll.ole32.CoInitialize(None)
+    try:
+        _threading._lock = _threading.RLock()  # 确保 win32clipboard 内部锁可用
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+        finally:
+            win32clipboard.CloseClipboard()
+    except Exception:
+        pass
+    finally:
+        ctypes.windll.ole32.CoUninitialize()
+
 
 # ── 通知后端检测 ────────────────────────────────────────────────────────────
 
@@ -51,10 +90,24 @@ _MB_ICONINFORMATION = 0x40
 _MB_OK = 0
 
 
-# ── winotify Toast 实现（首选，支持 AUMID + 声音）─────────────────────────
-def _send_winotify_toast(title: str, message: str, app_id: str = "ntfy-Notifier") -> bool:
+def _send_winotify_toast(title: str, message: str, app_id: str = "ntfy-Notifier", auto_copy_otp: bool = False) -> bool:
     """使用 winotify 发送 WinRT Toast 通知（通过 AUMID 显示应用图标）。"""
     try:
+        # 如果启用了自动复制验证码，提取并写入剪切板（后台线程）
+        if auto_copy_otp:
+            otp = _extract_otp(message)
+            if otp:
+                print(f"[ntfy-Notifier] OTP 提取成功: {otp}, 正在写入剪切板...", file=sys.stderr)
+                def _do_clipboard():
+                    try:
+                        _copy_to_clipboard(otp)
+                        print(f"[ntfy-Notifier] ✅ OTP 已写入剪切板", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[ntfy-Notifier] ❌ OTP 写入剪切板失败: {e}", file=sys.stderr)
+                threading.Thread(target=_do_clipboard, daemon=True).start()
+            else:
+                print(f"[ntfy-Notifier] ⚠️ OTP 提取失败，消息内容: {message[:100]}", file=sys.stderr)
+
         # 不传 icon，让通知中心使用默认图标
         toast = Notification(
             app_id=app_id,
@@ -102,7 +155,7 @@ def _create_toast_xml(title: str, message: str):
     return doc
 
 
-def send_toast(title: str, message: str, app_id: str = "ntfy-Notifier") -> bool:
+def send_toast(title: str, message: str, app_id: str = "ntfy-Notifier", auto_copy_otp: bool = False) -> bool:
     """
     发送 Windows 通知。
 
@@ -111,7 +164,7 @@ def send_toast(title: str, message: str, app_id: str = "ntfy-Notifier") -> bool:
     # 方案 1：winotify（WinRT Toast，支持 AUMID 图标）
     if _WINOTIFY_AVAILABLE:
         try:
-            return _send_winotify_toast(title, message, app_id)
+            return _send_winotify_toast(title, message, app_id, auto_copy_otp)
         except Exception:
             pass
 

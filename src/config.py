@@ -16,6 +16,7 @@ DEFAULT_CONFIG = {
     "password": "",  # 请在设置中填入你的 ntfy 访问密码
     "topic": "sms",
     "auto_start": False,
+    "auto_copy_otp": False,
 }
 
 
