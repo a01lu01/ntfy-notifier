@@ -89,15 +89,41 @@ def main():
 
     # 4. 通知后端测试
     log("\n--- 通知测试 ---")
-    from src.notifier import _WINRT_AVAILABLE, _PLYER_AVAILABLE, _WIN32GUI_AVAILABLE
-    log(f"winrt 可用: {_WINRT_AVAILABLE}")
-    log(f"plyer 可用: {_PLYER_AVAILABLE}")
-    log(f"win32gui 可用: {_WIN32GUI_AVAILABLE}")
+    try:
+        from src.notifier import (
+            _WINRT_AVAILABLE, _PLYER_AVAILABLE,
+            _WIN32GUI_AVAILABLE, _WINOTIFY_AVAILABLE,
+        )
+        log(f"winotify 可用: {_WINOTIFY_AVAILABLE}")
+        log(f"winrt 可用: {_WINRT_AVAILABLE}")
+        log(f"plyer 可用: {_PLYER_AVAILABLE}")
+        log(f"win32gui 可用: {_WIN32GUI_AVAILABLE}")
+    except Exception as e:
+        log(f"[FAIL] notifier 导入: {type(e).__name__}: {e}")
+        traceback.print_exc()
+
+    # winotify 通知测试（主程序优先使用此通道）
+    try:
+        from winotify import Notification, audio as wa
+        toast = Notification(
+            app_id="ntfy-Notifier",
+            title="诊断通知 (winotify)",
+            msg="ntfy-Notifier winotify 通知测试",
+            duration="short",
+        )
+        toast.set_audio(wa.Default, loop=False)
+        toast.show()
+        log("[OK] winotify 通知发送成功")
+        all_ok &= True
+    except Exception as e:
+        log(f"[FAIL] winotify 通知: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        all_ok = False
 
     if _PLYER_AVAILABLE:
         try:
             from plyer import notification
-            notification.notify(title="诊断通知", message="ntfy-Notifier 通知测试", timeout=5)
+            notification.notify(title="诊断通知 (plyer)", message="ntfy-Notifier plyer 通知测试", timeout=5)
             log("[OK] plyer 通知发送成功")
         except Exception as e:
             log(f"[FAIL] plyer 通知: {e}")

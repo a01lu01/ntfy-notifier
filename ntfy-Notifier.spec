@@ -108,8 +108,10 @@ _hidden = [
     'plyer.utils', 'plyer.compat',
     'plyer.facades', 'plyer.facades.notification',
     # winotify（Windows Toast 通知，首选，支持 AUMID）
-    'winotify', 'winotify.audio', 'winotify._registry',
-    'winotify._communication', 'winotify._run_ps',
+    'winotify', 'winotify.audio', 'winotify._notify',
+    'winotify._registry', 'winotify._communication', 'winotify._run_ps',
+    # re / 标准库
+    're',
 ]
 
 # ── 主程序 ──────────────────────────────────────────────────────────────────
