@@ -7,6 +7,13 @@ Windows 通知模块 - ntfy-Notifier
   4. print stderr（后备）
 
 订阅模式：SSE (Server-Sent Events) — 实时推送，无需轮询
+
+修复记录：
+- on_connected 改为在收到 SSE event:open 时触发（而非 HTTP 200）
+- 添加连接超时 (10s) 和读取超时 (90s)
+- 添加指数退避重连策略
+- 回调异常保护，防止回调异常导致订阅循环崩溃
+- 添加健康检查线程：跟踪最后收到数据时间，超时则主动断开重连
 """
 
 import sys
@@ -198,6 +205,20 @@ def send_toast(title: str, message: str, app_id: str = "ntfy-Notifier", auto_cop
     return False
 
 
+# ── SSE 常量 ──────────────────────────────────────────────────────────────
+
+# SSE 读取超时（秒）：如果超过此时间没收到任何数据，认为连接已死
+_SSE_READ_TIMEOUT = 90
+# SSE 连接超时（秒）
+_SSE_CONNECT_TIMEOUT = 10
+# 指数退避参数
+_RETRY_DELAY_INIT = 5      # 初始重连延迟（秒）
+_RETRY_DELAY_MAX = 300     # 最大重连延迟（秒）
+# 健康检查参数
+_HEALTH_CHECK_INTERVAL = 60   # 健康检查间隔（秒）
+_HEALTH_CHECK_TIMEOUT = 120   # 无数据超时阈值（秒）
+
+
 # ── SSE 订阅器 ──────────────────────────────────────────────────────────────
 
 class NtfySSESubscriber:
@@ -224,13 +245,19 @@ class NtfySSESubscriber:
         self.username = username
         self.password = password
         self.on_message = on_message
-        self.on_connected = on_connected        # SSE 连接成功回调
+        self.on_connected = on_connected        # SSE 连接成功回调（event:open 时触发）
         self.on_disconnected = on_disconnected  # SSE 连接断开回调
         
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._session_id: Optional[str] = None
-        self._resp: Optional[requests.Response] = None  # 保存响应对象以便关闭
+        self._resp = None  # 保存响应对象以便关闭
+        self._retry_delay = _RETRY_DELAY_INIT   # 指数退避当前延迟
+
+        # 健康检查相关
+        self._last_data_time: float = 0         # 最后收到 SSE 数据的时间
+        self._connected_flag: bool = False       # SSE 是否已收到 event:open
+        self._health_thread: Optional[threading.Thread] = None
 
     def start(self):
         """启动 SSE 订阅（在后台线程运行）。"""
@@ -245,6 +272,14 @@ class NtfySSESubscriber:
         )
         self._thread.start()
 
+        # 启动健康检查线程
+        self._health_thread = threading.Thread(
+            target=self._health_check_loop,
+            daemon=True,
+            name="NtfyHealthThread",
+        )
+        self._health_thread.start()
+
     def stop(self):
         """停止 SSE 订阅。"""
         self._running = False
@@ -257,6 +292,71 @@ class NtfySSESubscriber:
             self._resp = None
         if self._thread:
             self._thread.join(timeout=5)
+        # 健康检查线程是 daemon 的，_running=False 后会自行退出
+
+    def _notify_disconnected(self):
+        """安全地触发 on_disconnected 回调。"""
+        self._connected_flag = False
+        if self.on_disconnected:
+            try:
+                self.on_disconnected()
+            except Exception as e:
+                print(f"[ntfy] on_disconnected 回调异常: {e}", file=sys.stderr)
+
+    def _notify_connected(self):
+        """安全地触发 on_connected 回调。"""
+        self._connected_flag = True
+        if self.on_connected:
+            try:
+                self.on_connected()
+            except Exception as e:
+                print(f"[ntfy] on_connected 回调异常: {e}", file=sys.stderr)
+
+    def _wait_with_backoff(self):
+        """指数退避等待，连接成功后重置延迟。"""
+        delay = self._retry_delay
+        self._retry_delay = min(self._retry_delay * 2, _RETRY_DELAY_MAX)
+        # 分段等待，以便及时响应 stop()
+        end_time = time.time() + delay
+        while self._running and time.time() < end_time:
+            time.sleep(min(1, end_time - time.time()))
+
+    def _reset_backoff(self):
+        """连接成功后重置退避延迟。"""
+        self._retry_delay = _RETRY_DELAY_INIT
+
+    def _health_check_loop(self):
+        """健康检查循环：检测僵尸连接并主动重连。
+
+        如果 SSE 连接声称已连接但超过 _HEALTH_CHECK_TIMEOUT 秒没收到
+        任何数据，说明连接可能已死（TCP 半开），主动关闭连接触发重连。
+        """
+        while self._running:
+            time.sleep(_HEALTH_CHECK_INTERVAL)
+
+            if not self._running:
+                break
+
+            # 只在连接声称已连接时检查
+            if not self._connected_flag:
+                continue
+
+            now = time.time()
+            elapsed = now - self._last_data_time
+
+            if self._last_data_time > 0 and elapsed > _HEALTH_CHECK_TIMEOUT:
+                print(
+                    f"[ntfy] 健康检查：超过 {elapsed:.0f}s 未收到数据，"
+                    f"怀疑僵尸连接，主动断开重连",
+                    file=sys.stderr,
+                )
+                # 关闭响应以中断 iter_lines，触发重连
+                if self._resp is not None:
+                    try:
+                        self._resp.close()
+                    except Exception:
+                        pass
+                    # 不置 None，让 _subscribe_loop 的 iter_lines 抛异常后自行处理
 
     def _subscribe_loop(self):
         """SSE 订阅循环，自动重连。"""
@@ -272,7 +372,7 @@ class NtfySSESubscriber:
                 self._resp = requests.get(
                     url,
                     auth=auth,
-                    timeout=None,  # SSE 是长连接，不设置超时
+                    timeout=(_SSE_CONNECT_TIMEOUT, _SSE_READ_TIMEOUT),
                     proxies={"http": None, "https": None},
                     stream=True,
                 )
@@ -280,22 +380,25 @@ class NtfySSESubscriber:
                 if self._resp.status_code != 200:
                     print(f"[ntfy] ⚠️ SSE 连接失败：HTTP {self._resp.status_code}", file=sys.stderr)
                     self._resp = None
-                    if self.on_disconnected:
-                        self.on_disconnected()
-                    time.sleep(5)
+                    self._notify_disconnected()
+                    self._wait_with_backoff()
                     continue
                 
-                # 通知连接成功
-                if self.on_connected:
-                    self.on_connected()
+                # 注意：不再在 HTTP 200 时立即触发 on_connected
+                # 等收到 SSE event:open 才确认连接成功
+                print("[ntfy] SSE HTTP 200，等待 event:open 确认...", file=sys.stderr)
                 
-                print("[ntfy] ✅ SSE 已连接，等待消息...", file=sys.stderr)
-                
+                # 重置数据时间戳
+                self._last_data_time = time.time()
+
                 # 解析 SSE 事件流
                 for line in self._resp.iter_lines():
                     if not self._running:
                         break
                     
+                    # 每收到任何一行数据，更新时间戳
+                    self._last_data_time = time.time()
+
                     try:
                         text = line.decode('utf-8')
                         
@@ -309,6 +412,13 @@ class NtfySSESubscriber:
                             if event_type == "open":
                                 self._session_id = msg.get("id")
                                 print(f"[ntfy] SSE session opened: {self._session_id}", file=sys.stderr)
+                                # 收到 open 事件才确认连接成功
+                                self._notify_connected()
+                                self._reset_backoff()
+                                print("[ntfy] SSE 已连接，等待消息...", file=sys.stderr)
+                            elif event_type == "keepalive":
+                                # 心跳消息，无需特殊处理
+                                pass
                             elif event_type == "message":
                                 # 收到新消息，触发回调
                                 if self.on_message:
@@ -323,27 +433,33 @@ class NtfySSESubscriber:
                 self._resp = None
                 if not self._running:
                     break  # 主动停止，不重连
-                if self.on_disconnected:
-                    self.on_disconnected()
-                print("[ntfy] ⚠️ SSE 连接断开，5 秒后重连...", file=sys.stderr)
-                time.sleep(5)
+                self._notify_disconnected()
+                print(f"[ntfy] SSE 连接断开，{self._retry_delay} 秒后重连...", file=sys.stderr)
+                self._wait_with_backoff()
                 
             except requests.exceptions.ConnectionError:
                 self._resp = None
                 if not self._running:
                     break
-                if self.on_disconnected:
-                    self.on_disconnected()
-                print("[ntfy] ⚠️ 网络连接失败，5 秒后重试...", file=sys.stderr)
-                time.sleep(5)
+                self._notify_disconnected()
+                print(f"[ntfy] 网络连接失败，{self._retry_delay} 秒后重试...", file=sys.stderr)
+                self._wait_with_backoff()
+            except requests.exceptions.Timeout:
+                self._resp = None
+                if not self._running:
+                    break
+                self._notify_disconnected()
+                print(f"[ntfy] SSE 读取超时（{_SSE_READ_TIMEOUT}s），重连...", file=sys.stderr)
+                # 读取超时时重置退避延迟
+                self._retry_delay = _RETRY_DELAY_INIT
+                time.sleep(1)
             except Exception as e:
                 self._resp = None
                 if not self._running:  # 主动停止时的异常忽略
                     break
-                if self.on_disconnected:
-                    self.on_disconnected()
-                print(f"[ntfy] ⚠️ SSE 错误：{type(e).__name__}: {e}", file=sys.stderr)
-                time.sleep(5)
+                self._notify_disconnected()
+                print(f"[ntfy] SSE 错误：{type(e).__name__}: {e}", file=sys.stderr)
+                self._wait_with_backoff()
 
 
 # ── 便捷函数 ──────────────────────────────────────────────────────────────

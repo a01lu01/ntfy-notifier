@@ -4,6 +4,12 @@ ntfy-Notifier 主程序
 遵循 Fluent Design 视觉风格
 
 订阅模式：SSE (Server-Sent Events) — 实时推送，无需轮询
+
+修复记录：
+- 添加 Windows 命名互斥体单例锁
+- 开机启动时主动 HTTP 探测网络就绪，替代固定 15s 延迟
+- 修复：托盘图标更新改为 PostMessage 线程安全方式（tray.py）
+- 修复：SSE 健康检查防止僵尸连接（notifier.py）
 """
 
 import sys
@@ -18,6 +24,86 @@ import requests
 from src.config import load_config, save_config
 from src.notifier import send_toast, NtfySSESubscriber
 from src.tray import TrayIcon
+
+# ── 单例锁 ───────────────────────────────────────────
+
+_mutex = None  # 保持互斥体引用，防止被 GC 回收
+
+
+def _check_single_instance():
+    """Windows 命名互斥体单例锁，防止多个实例同时运行。"""
+    global _mutex
+    try:
+        import ctypes
+        import ctypes.wintypes
+        _mutex = ctypes.windll.kernel32.CreateMutexW(
+            None, False, "ntfy-Notifier-SingleInstance"
+        )
+        last_error = ctypes.windll.kernel32.GetLastError()
+        if last_error == 183:  # ERROR_ALREADY_EXISTS
+            print("[ntfy] 另一个实例已在运行，退出", file=sys.stderr)
+            sys.exit(0)
+    except Exception as e:
+        print(f"[ntfy] 单例锁检查失败: {e}", file=sys.stderr)
+
+
+def _is_boot_period():
+    """检测是否在开机后2分钟内。"""
+    try:
+        import ctypes
+        import ctypes.wintypes
+        # GetTickCount64 returns milliseconds since boot
+        class ULARGE(ctypes.Structure):
+            _fields_ = [("low", ctypes.wintypes.DWORD), ("high", ctypes.wintypes.DWORD)]
+        tick = ULARGE()
+        ctypes.windll.kernel32.GetTickCount64(ctypes.byref(tick))
+        ms = tick.low | (tick.high << 32)
+        return ms < 120000  # 120 seconds
+    except Exception:
+        return False
+
+
+def _wait_for_network(server_url: str, max_wait: int = 60, interval: int = 3) -> bool:
+    """等待网络就绪，通过 HTTP 探测服务器可达性。
+
+    在后台线程中调用，不会阻塞 Tk 主线程。
+
+    Args:
+        server_url: ntfy 服务器地址（如 http://your-server:8080）
+        max_wait: 最大等待时间（秒）
+        interval: 探测间隔（秒）
+
+    Returns:
+        True 表示服务器可达，False 表示超时
+    """
+    start = time.time()
+    attempt = 0
+    while time.time() - start < max_wait:
+        attempt += 1
+        try:
+            # 简单的 HTTP GET 探测，只关心能否建立连接
+            resp = requests.get(
+                server_url,
+                timeout=5,
+                proxies={"http": None, "https": None},
+            )
+            print(f"[ntfy] 网络就绪探测成功（第 {attempt} 次，HTTP {resp.status_code}）", file=sys.stderr)
+            return True
+        except (requests.ConnectionError, requests.Timeout):
+            elapsed = time.time() - start
+            print(
+                f"[ntfy] 网络未就绪（第 {attempt} 次，已等待 {elapsed:.0f}s），"
+                f"{interval}s 后重试...",
+                file=sys.stderr,
+            )
+            time.sleep(interval)
+        except Exception as e:
+            print(f"[ntfy] 网络探测异常: {type(e).__name__}: {e}", file=sys.stderr)
+            time.sleep(interval)
+
+    print(f"[ntfy] 网络就绪探测超时（{max_wait}s），放弃等待", file=sys.stderr)
+    return False
+
 
 # ── 全局状态 ────────────────────────────────────────────────────────────────
 
@@ -312,6 +398,9 @@ def main():
 
     import tkinter as tk
 
+    # 单例锁检查（必须在任何 UI 初始化之前）
+    _check_single_instance()
+
     _config, is_first_run = load_config()
 
     # 注册 AUMID（让通知中心显示铃铛图标）
@@ -334,8 +423,21 @@ def main():
     _tray = TrayIcon(on_settings=_open_settings_thread_safe, on_quit=_quit_thread_safe)
     _tray.start(connected=False)
 
-    # 启动 SSE 订阅
-    _start_sse_subscription()
+    # 开机启动时：主动探测网络就绪后再启动 SSE
+    if _is_boot_period():
+        print("[ntfy] 检测到开机启动，探测网络就绪后启动 SSE...", file=sys.stderr)
+        server_url = _config.get("server", "")
+        if server_url:
+            def _boot_delayed_start():
+                _wait_for_network(server_url, max_wait=60, interval=3)
+                # 无论探测是否成功，都尝试启动 SSE（SSE 本身有重连机制）
+                if _root:
+                    _root.after(0, _start_sse_subscription)
+            threading.Thread(target=_boot_delayed_start, daemon=True, name="BootNetProbe").start()
+        else:
+            _root.after(15000, _start_sse_subscription)  # 无服务器地址时的后备
+    else:
+        _start_sse_subscription()
 
     # 主 Tk 线程：永不退出
     _root.mainloop()
