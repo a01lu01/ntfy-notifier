@@ -95,7 +95,7 @@ _hidden = [
     'requests.sessions', 'requests.status_codes',
     'requests.structures', 'requests.utils', 'requests.compat',
     'urllib3', 'urllib3.util', 'urllib3.exceptions',
-    'urllib3.response', 'urllib3.request',
+    'urllib3.response',
     'charset_normalizer', 'certifi', 'idna',
     # PIL（Pillow C 扩展 + 插件）
     'PIL', 'PIL.Image', 'PIL.ImageDraw', 'PIL.ImageFont',
@@ -105,11 +105,11 @@ _hidden = [
     # plyer（Windows 通知，后备）
     'plyer', 'plyer.platforms', 'plyer.platforms.win',
     'plyer.platforms.win.notification',
-    'plyer.utils', 'plyer.compat',
+    'plyer.utils',
     'plyer.facades', 'plyer.facades.notification',
     # winotify（Windows Toast 通知，首选，支持 AUMID）
     'winotify', 'winotify.audio', 'winotify._notify',
-    'winotify._registry', 'winotify._communication', 'winotify._run_ps',
+    'winotify._registry', 'winotify._communication',
     # re / 标准库
     're',
 ]

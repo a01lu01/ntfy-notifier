@@ -26,6 +26,12 @@ def check_module(name, import_fn):
         return False
 
 def main():
+    # 控制台编码适配：避免 ✅ 等字符在 GBK 终端上触发 UnicodeEncodeError
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     log("=" * 50)
     log("ntfy-Notifier 诊断报告")
     log(f"时间: {os.popen('date /t && time /t').read().strip()}")
