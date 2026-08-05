@@ -24,9 +24,6 @@ import threading
 import time
 from typing import Callable, Optional
 
-# ── 剪切板模块（Windows win32clipboard，线程安全）──────────────────────────
-import threading as _threading
-
 try:
     import win32clipboard
     _CLIPBOARD_AVAILABLE = True
@@ -34,30 +31,59 @@ except ImportError:
     _CLIPBOARD_AVAILABLE = False
 
 
+_OTP_KEYWORDS = re.compile(r"(验证码|动态码|校验码|安全码|一次性密码|OTP)")
+_OTP_DIGITS = re.compile(r"(?<![0-9])(\d{4,8})(?![0-9])")
+
+
 def _extract_otp(text: str) -> Optional[str]:
-    """从消息文本中提取验证码（4-8 位字母数字组合）。"""
-    # 匹配独立的 4-8 位字母数字序列（前后为空格、标点或边界）
-    match = re.search(r'(?<![A-Za-z0-9])([A-Za-z0-9]{4,8})(?![A-Za-z0-9])', text)
+    """从消息文本中提取 4-8 位纯数字验证码。
+
+    优先取“验证码”等关键词后 30 字符内的独立数字段，
+    找不到再取全文首个独立数字段；只匹配纯数字，避免把
+    Google 等英文词误当验证码。
+    """
+    if not text:
+        return None
+
+    for m in _OTP_KEYWORDS.finditer(text):
+        window = text[m.end():m.end() + 30]
+        match = _OTP_DIGITS.search(window)
+        if match:
+            return match.group(1)
+
+    match = _OTP_DIGITS.search(text)
     return match.group(1) if match else None
 
 
-def _copy_to_clipboard(text: str):
-    """将文本复制到系统剪切板（使用 win32clipboard，线程安全）。"""
+def _copy_to_clipboard(text: str) -> bool:
+    """将文本复制到系统剪切板（win32clipboard，带重试）。"""
     if not _CLIPBOARD_AVAILABLE:
-        return
-    # 在子线程里调用 win32clipboard 需要先初始化 COM
+        return False
     import ctypes
     ctypes.windll.ole32.CoInitialize(None)
     try:
-        _threading._lock = _threading.RLock()  # 确保 win32clipboard 内部锁可用
-        win32clipboard.OpenClipboard()
+        opened = False
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                win32clipboard.OpenClipboard()
+                opened = True
+                break
+            except Exception as e:
+                last_error = e
+                time.sleep(0.1)
+        if not opened:
+            print(f"[ntfy-Notifier] ❌ 打开剪贴板失败: {last_error}", file=sys.stderr)
+            return False
         try:
             win32clipboard.EmptyClipboard()
             win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
         finally:
             win32clipboard.CloseClipboard()
-    except Exception:
-        pass
+        return True
+    except Exception as e:
+        print(f"[ntfy-Notifier] ❌ 写入剪贴板失败: {e}", file=sys.stderr)
+        return False
     finally:
         ctypes.windll.ole32.CoUninitialize()
 
@@ -148,11 +174,12 @@ def _send_plyer_toast(title: str, message: str) -> bool:
 
 # ── winrt Toast 实现 ────────────────────────────────────────────────────────
 def _create_toast_xml(title: str, message: str):
+    from xml.sax.saxutils import escape
     xml_string = (
         f'<toast activationType="protocol">'
         f'<visual><binding template="ToastGeneric">'
-        f'<text>{title}</text>'
-        f'<text>{message}</text>'
+        f'<text>{escape(title)}</text>'
+        f'<text>{escape(message)}</text>'
         f'</binding></visual>'
         f'<audio src="ms-winsoundevent:Notification.IM" />'
         f'</toast>'
@@ -167,22 +194,22 @@ def send_toast(title: str, message: str, app_id: str = "ntfy-Notifier", auto_cop
     发送 Windows 通知。
 
     优先级：winotify → plyer → winrt Toast → win32gui MessageBox → print stderr
+    每个后端失败（返回 False 或抛异常）都会继续尝试下一级。
     """
-    # 方案 1：winotify（WinRT Toast，支持 AUMID 图标）
     if _WINOTIFY_AVAILABLE:
         try:
-            return _send_winotify_toast(title, message, app_id, auto_copy_otp)
+            if _send_winotify_toast(title, message, app_id, auto_copy_otp):
+                return True
         except Exception:
-            pass
+            traceback.print_exc()
 
-    # 方案 2：plyer（跨平台，无 AUMID 支持，图标为默认）
     if _PLYER_AVAILABLE:
         try:
-            return _send_plyer_toast(title, message)
+            if _send_plyer_toast(title, message):
+                return True
         except Exception:
-            pass
+            traceback.print_exc()
 
-    # 方案 3：winrt Toast（静默通知，Windows 10/11 原生样式）
     if _WINRT_AVAILABLE:
         try:
             notifier = ToastNotificationManager.create_notifier(app_id)
@@ -192,7 +219,6 @@ def send_toast(title: str, message: str, app_id: str = "ntfy-Notifier", auto_cop
         except Exception:
             traceback.print_exc()
 
-    # 方案 4：win32gui 弹窗（有系统提示音）
     if _WIN32GUI_AVAILABLE:
         try:
             win32gui.MessageBox(0, message, title, _MB_ICONINFORMATION | _MB_OK)
@@ -200,7 +226,6 @@ def send_toast(title: str, message: str, app_id: str = "ntfy-Notifier", auto_cop
         except Exception:
             traceback.print_exc()
 
-    # 方案 5：stderr 打印（仅调试用）
     print(f"[ntfy-Notifier 通知] {title}: {message}", file=sys.stderr)
     return False
 
@@ -252,6 +277,7 @@ class NtfySSESubscriber:
         self._thread: Optional[threading.Thread] = None
         self._session_id: Optional[str] = None
         self._resp = None  # 保存响应对象以便关闭
+        self._resp_lock = threading.Lock()
         self._retry_delay = _RETRY_DELAY_INIT   # 指数退避当前延迟
 
         # 健康检查相关
@@ -284,15 +310,21 @@ class NtfySSESubscriber:
         """停止 SSE 订阅。"""
         self._running = False
         # 关闭响应以中断 iter_lines 阻塞
-        if self._resp is not None:
-            try:
-                self._resp.close()
-            except Exception:
-                pass
-            self._resp = None
+        self._close_resp()
         if self._thread:
             self._thread.join(timeout=5)
         # 健康检查线程是 daemon 的，_running=False 后会自行退出
+
+    def _close_resp(self):
+        """加锁关闭并清空当前响应，中断 iter_lines 阻塞。"""
+        with self._resp_lock:
+            resp = self._resp
+            self._resp = None
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
     def _notify_disconnected(self):
         """安全地触发 on_disconnected 回调。"""
@@ -351,12 +383,7 @@ class NtfySSESubscriber:
                     file=sys.stderr,
                 )
                 # 关闭响应以中断 iter_lines，触发重连
-                if self._resp is not None:
-                    try:
-                        self._resp.close()
-                    except Exception:
-                        pass
-                    # 不置 None，让 _subscribe_loop 的 iter_lines 抛异常后自行处理
+                self._close_resp()
 
     def _subscribe_loop(self):
         """SSE 订阅循环，自动重连。"""
@@ -369,17 +396,19 @@ class NtfySSESubscriber:
                 
                 print(f"[ntfy] SSE 连接中... {url}", file=sys.stderr)
                 
-                self._resp = requests.get(
+                resp = requests.get(
                     url,
                     auth=auth,
                     timeout=(_SSE_CONNECT_TIMEOUT, _SSE_READ_TIMEOUT),
                     proxies={"http": None, "https": None},
                     stream=True,
                 )
+                with self._resp_lock:
+                    self._resp = resp
                 
                 if self._resp.status_code != 200:
                     print(f"[ntfy] ⚠️ SSE 连接失败：HTTP {self._resp.status_code}", file=sys.stderr)
-                    self._resp = None
+                    self._close_resp()
                     self._notify_disconnected()
                     self._wait_with_backoff()
                     continue
@@ -430,7 +459,7 @@ class NtfySSESubscriber:
                         pass
                 
                 # SSE 连接断开
-                self._resp = None
+                self._close_resp()
                 if not self._running:
                     break  # 主动停止，不重连
                 self._notify_disconnected()
@@ -438,14 +467,14 @@ class NtfySSESubscriber:
                 self._wait_with_backoff()
                 
             except requests.exceptions.ConnectionError:
-                self._resp = None
+                self._close_resp()
                 if not self._running:
                     break
                 self._notify_disconnected()
                 print(f"[ntfy] 网络连接失败，{self._retry_delay} 秒后重试...", file=sys.stderr)
                 self._wait_with_backoff()
             except requests.exceptions.Timeout:
-                self._resp = None
+                self._close_resp()
                 if not self._running:
                     break
                 self._notify_disconnected()
@@ -454,7 +483,7 @@ class NtfySSESubscriber:
                 self._retry_delay = _RETRY_DELAY_INIT
                 time.sleep(1)
             except Exception as e:
-                self._resp = None
+                self._close_resp()
                 if not self._running:  # 主动停止时的异常忽略
                     break
                 self._notify_disconnected()
@@ -478,7 +507,7 @@ def subscribe_ntfy(server: str, topic: str, username: str = "", password: str = 
         NtfySSESubscriber 实例
     
     Example:
-        subscriber = subscribe_ntfy("http://your-server:8080", "sms", "iPhone", "your_password")
+        subscriber = subscribe_ntfy("http://your-server:8080", "sms", "your_username", "your_password")
         
         def on_message(msg):
             title = msg.get("title") or "ntfy 消息"

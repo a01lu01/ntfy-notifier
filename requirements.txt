@@ -2,10 +2,10 @@
 # ============================
 # 安装方式：pip install -r requirements.txt
 
-pystray>=0.17.0       # 跨平台托盘图标（推荐，已包含线程调度）
+pystray==0.19.5       # 跨平台托盘图标（锁定已验证版本）
 pillow>=10.0.0        # pystray 依赖，用于生成托盘图标图片
 requests>=2.31.0      # HTTP 轮询 ntfy 服务
-winotify>=1.1.0       # Windows Toast 通知（首选，支持 AUMID 图标）
+winotify==1.1.0       # Windows Toast 通知（首选，支持 AUMID 图标，锁定已验证版本）
 plyer>=2.1.0          # Windows Toast 通知（后备，不支持 AUMID）
 
 # Windows 专用（可选，无 pywin32 时 win32gui 后备不可用）

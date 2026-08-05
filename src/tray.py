@@ -57,9 +57,14 @@ def _make_fallback_icon(connected: bool) -> Image:
 
 
 # ── pystray Menu 项 ─────────────────────────────────────────────────────────
-def _make_menu(on_settings: Optional[Callable], on_quit: Optional[Callable]):
+def _make_menu(on_history: Optional[Callable], on_settings: Optional[Callable],
+               on_quit: Optional[Callable]):
     """构建 pystray 菜单。"""
     import pystray
+
+    def history_action(icon=None, item=None):
+        if on_history:
+            on_history()
 
     def settings_action(icon=None, item=None):
         if on_settings:
@@ -70,7 +75,8 @@ def _make_menu(on_settings: Optional[Callable], on_quit: Optional[Callable]):
             on_quit()
 
     return pystray.Menu(
-        pystray.MenuItem("⚙️  设置...", settings_action, default=True),
+        pystray.MenuItem("📋  推送历史...", history_action, default=True),
+        pystray.MenuItem("⚙️  设置...", settings_action),
         pystray.MenuItem("❌  退出", quit_action),
     )
 
@@ -78,8 +84,10 @@ def _make_menu(on_settings: Optional[Callable], on_quit: Optional[Callable]):
 # ── TrayIcon 类 ─────────────────────────────────────────────────────────────
 class TrayIcon:
     def __init__(self, on_settings: Optional[Callable] = None,
+                 on_history: Optional[Callable] = None,
                  on_quit: Optional[Callable] = None):
         self._on_settings = on_settings
+        self._on_history = on_history
         self._on_quit = on_quit
         self._icon: Optional["pystray.Icon"] = None
         self._thread: Optional[threading.Thread] = None
@@ -114,7 +122,7 @@ class TrayIcon:
             self._connected = connected
             # 优先使用预加载的图标
             icon_image = self._get_cached_icon(connected)
-            menu = _make_menu(self._on_settings, self._on_quit)
+            menu = _make_menu(self._on_history, self._on_settings, self._on_quit)
 
             tip = "ntfy-Notifier · 已连接" if connected else "ntfy-Notifier · 未连接"
 
@@ -127,7 +135,13 @@ class TrayIcon:
 
             # 注册自定义消息处理函数，使 pystray 线程的 _dispatcher
             # 能在正确线程上处理 WM_UPDATE_STATE 消息
-            self._icon._message_handlers[_WM_UPDATE_STATE] = self._on_wm_update_state
+            # 防御 pystray 内部结构变化：缺失时降级为公开 setter
+            handlers = getattr(self._icon, "_message_handlers", None)
+            if handlers is not None:
+                try:
+                    handlers[_WM_UPDATE_STATE] = self._on_wm_update_state
+                except Exception as e:
+                    print(f"[tray] 注册消息处理失败，降级更新方式: {e}", file=sys.stderr)
 
             self._thread = threading.Thread(
                 target=self._icon.run,

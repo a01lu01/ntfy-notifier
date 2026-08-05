@@ -81,7 +81,7 @@ ntfy-notifier/
 │ ntfy-Notifier 设置               │
 ├─────────────────────────────────┤
 │ 服务器地址: [http://your-server:8080] │
-│ 用户名:     [iPhone              ] │
+│ 用户名:     [your_username       ] │
 │ 密码:       [••••••••            ] │
 │ 订阅话题:   [sms                 ] │
 │ 轮询间隔:   [3] 秒               │
@@ -131,8 +131,8 @@ ntfy-notifier/
 ```json
 {
   "server": "http://your-server:8080",
-  "username": "iPhone",
-  "password": "***REMOVED***",
+  "username": "your_username",
+  "password": "your_password",
   "topic": "sms",
   "poll_interval": 3,
   "auto_start": false

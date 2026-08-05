@@ -12,16 +12,19 @@ ntfy-Notifier 主程序
 - 修复：SSE 健康检查防止僵尸连接（notifier.py）
 """
 
+import os
 import sys
 import threading
 import time
 import traceback
+from queue import Empty, Queue
 from typing import Optional
 from threading import Event
 
 import requests
 
 from src.config import load_config, save_config
+from src.history import record_message
 from src.notifier import send_toast, NtfySSESubscriber
 from src.tray import TrayIcon
 
@@ -113,6 +116,7 @@ _running = True
 _connected = False
 _tray: Optional[TrayIcon] = None
 _root: "tk.Tk | None" = None
+_ui_queue: Optional[Queue] = None
 
 
 def _set_auto_start(enabled: bool):
@@ -125,8 +129,19 @@ def _set_auto_start(enabled: bool):
             0, winreg.KEY_SET_VALUE,
         )
         if enabled:
-            exe_path = sys.executable
-            winreg.SetValueEx(key, "ntfy-Notifier", 0, winreg.REG_SZ, f'"{exe_path}"')
+            if getattr(sys, "frozen", False):
+                target = f'"{sys.executable}"'
+            else:
+                # 源码运行：用 pythonw.exe（避免黑框）+ 主脚本绝对路径
+                python = sys.executable
+                pythonw = os.path.join(os.path.dirname(python), "pythonw.exe")
+                if not os.path.exists(pythonw):
+                    pythonw = python
+                script = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "ntfy_notifier.py"
+                )
+                target = f'"{pythonw}" "{script}"'
+            winreg.SetValueEx(key, "ntfy-Notifier", 0, winreg.REG_SZ, target)
         else:
             try:
                 winreg.DeleteValue(key, "ntfy-Notifier")
@@ -265,7 +280,7 @@ def _register_aumid():
 
 
 def _open_settings():
-    """在主 Tk 线程中弹出设置窗口（通过 after 调度，避免 pystray 子线程操作 Tk）。"""
+    """在主 Tk 线程中弹出设置窗口。"""
     if _root is None:
         return
 
@@ -276,9 +291,10 @@ def _open_settings():
         _config = cfg
         _set_auto_start(cfg.get("auto_start", False))
         
-        # 重新连接 SSE（如果之前有连接）
+        # 重新连接 SSE：无论当前是否已连接都重启订阅，
+        # 保证断线状态下修改的配置也能立即生效
         # 在后台线程中执行 stop + restart，避免 join 阻塞 Tk 主线程
-        if _subscriber and _connected:
+        if _subscriber is not None:
             print("[ntfy] 配置已更新，后台重连 SSE...", file=sys.stderr)
             
             def _reconnect():
@@ -292,18 +308,56 @@ def _open_settings():
     win.show()
 
 
-def _open_settings_thread_safe():
-    """线程安全入口：pystray 回调调用此函数，内部通过 after 切换到主 Tk 线程。"""
+def _open_history():
+    """在主 Tk 线程中打开推送历史窗口。"""
+    if _root is None:
+        return
+    from src.ui import HistoryWindow
+    win = HistoryWindow(master=_root, on_settings=_open_settings)
+    win.show()
+
+
+def _post_to_ui(fn):
+    """把任务投递到主 Tk 线程（线程安全，非阻塞）。"""
+    if _ui_queue is not None:
+        _ui_queue.put(fn)
+
+
+def _drain_ui_queue():
+    """主线程轮询 UI 队列并执行任务（由 root.after 驱动）。"""
+    if _ui_queue is not None:
+        while True:
+            try:
+                fn = _ui_queue.get_nowait()
+            except Empty:
+                break
+            try:
+                fn()
+            except Exception:
+                traceback.print_exc()
     if _root is not None:
-        _root.after(0, _open_settings)
+        try:
+            _root.after(50, _drain_ui_queue)
+        except Exception:
+            pass
+
+
+def _open_settings_thread_safe():
+    """线程安全入口：pystray 回调调用此函数，内部切换到主 Tk 线程。"""
+    _post_to_ui(_open_settings)
+
+
+def _open_history_thread_safe():
+    """线程安全入口：托盘点击历史入口时调用。"""
+    _post_to_ui(_open_history)
 
 
 def _quit_thread_safe():
-    """线程安全入口：pystray 退出回调，通过 after 切换到主 Tk 线程执行退出。"""
-    if _root is not None:
-        _root.after(0, _quit)
-    else:
+    """线程安全入口：pystray 退出回调，切换到主 Tk 线程执行退出。"""
+    if _root is None:
         _quit()
+    else:
+        _post_to_ui(_quit)
 
 
 def _on_ntfy_message(msg: dict):
@@ -314,21 +368,29 @@ def _on_ntfy_message(msg: dict):
     if not msg_id:
         return
     
-    # 检查是否已处理过（避免重复通知）
-    if hasattr(_on_ntfy_message, 'seen_ids'):
-        seen_ids = _on_ntfy_message.seen_ids
-    else:
-        seen_ids = set()
-        _on_ntfy_message.seen_ids = seen_ids
-    
-    # 清理旧 ID（保留最近 1000 条）
-    if len(seen_ids) > 1000:
-        seen_ids.clear()
-    
-    if msg_id in seen_ids:
+    # 持久化去重：历史库中已存在该 id → 重复消息，跳过通知
+    try:
+        recorded = record_message(msg)
+    except Exception as e:
+        print(f"[ntfy] 历史记录写入异常: {e}", file=sys.stderr)
+        recorded = None
+
+    if recorded is False:
+        print(f"[ntfy] 跳过重复消息：{msg_id}", file=sys.stderr)
         return
-    
-    seen_ids.add(msg_id)
+
+    if recorded is None:
+        # 数据库不可用 → 回退到内存去重，保证不重复通知
+        if not hasattr(_on_ntfy_message, "_seen_ids"):
+            _on_ntfy_message._seen_ids = set()
+        seen_ids = _on_ntfy_message._seen_ids
+        if msg_id in seen_ids:
+            return
+        seen_ids.add(msg_id)
+        # 超过 1000 条时逐条淘汰，不再整体清空
+        if len(seen_ids) > 1000:
+            for _ in range(len(seen_ids) // 2):
+                seen_ids.pop()
     
     title = msg.get("title") or "ntfy 消息"
     message = msg.get("message") or str(msg)
@@ -350,13 +412,16 @@ def _start_sse_subscription():
     username = cfg.get("username", "")
     password = cfg.get("password", "")
     
+    # 无论配置是否完整，都先停止旧订阅，避免旧连接残留
+    if _subscriber is not None:
+        _subscriber.stop()
+        _subscriber = None
+
     if not server or not topic:
+        print("[ntfy] 未配置服务器或主题，不启动订阅", file=sys.stderr)
         return
-    
+
     try:
-        # 停止旧的订阅
-        if _subscriber:
-            _subscriber.stop()
         
         # 创建新的 SSE 订阅器
         def on_connected():
@@ -394,14 +459,14 @@ def _start_sse_subscription():
 
 
 def main():
-    global _root, _config, _tray, _running
+    global _root, _config, _tray, _running, _ui_queue
 
     import tkinter as tk
 
     # 单例锁检查（必须在任何 UI 初始化之前）
     _check_single_instance()
 
-    _config, is_first_run = load_config()
+    _config, is_first_run, config_was_corrupt = load_config()
 
     # 注册 AUMID（让通知中心显示铃铛图标）
     _register_aumid()
@@ -412,6 +477,17 @@ def main():
     # 拦截关闭，防止 root 被意外销毁
     _root.protocol("WM_DELETE_WINDOW", lambda: None)
 
+    # 主线程 UI 任务队列（pystray/后台线程只投递，不直接操作 Tk）
+    _ui_queue = Queue()
+    _root.after(50, _drain_ui_queue)
+
+    if config_was_corrupt:
+        _root.after(400, lambda: tk.messagebox.showwarning(
+            "ntfy-Notifier",
+            "配置文件损坏，已备份并重置为默认配置，请重新填写设置。",
+            parent=_root,
+        ))
+
     # 首次运行 → 在 mainloop 启动后立即弹出设置窗口（已在 Tk 线程，无需 after）
     if is_first_run:
         _root.after(200, _open_settings)
@@ -420,7 +496,11 @@ def main():
         _set_auto_start(True)
 
     # 启动托盘（此时 Tk 已在运行），使用线程安全入口
-    _tray = TrayIcon(on_settings=_open_settings_thread_safe, on_quit=_quit_thread_safe)
+    _tray = TrayIcon(
+        on_settings=_open_settings_thread_safe,
+        on_history=_open_history_thread_safe,
+        on_quit=_quit_thread_safe,
+    )
     _tray.start(connected=False)
 
     # 开机启动时：主动探测网络就绪后再启动 SSE
@@ -431,8 +511,7 @@ def main():
             def _boot_delayed_start():
                 _wait_for_network(server_url, max_wait=60, interval=3)
                 # 无论探测是否成功，都尝试启动 SSE（SSE 本身有重连机制）
-                if _root:
-                    _root.after(0, _start_sse_subscription)
+                _post_to_ui(_start_sse_subscription)
             threading.Thread(target=_boot_delayed_start, daemon=True, name="BootNetProbe").start()
         else:
             _root.after(15000, _start_sse_subscription)  # 无服务器地址时的后备

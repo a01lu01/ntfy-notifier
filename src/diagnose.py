@@ -22,7 +22,7 @@ def check_module(name, import_fn):
         return True
     except Exception as e:
         log(f"[FAIL] {name}: {type(e).__name__}: {e}")
-        traceback.print_exc(file=open(LOG_FILE, "a", encoding="utf-8") if False else sys.stdout)
+        traceback.print_exc()
         return False
 
 def main():
@@ -63,25 +63,32 @@ def main():
         import requests
         # 尝试连接 ntfy 服务器
         from src.config import load_config
-        cfg, _ = load_config()
-        server = cfg.get("server", "http://your-server:8080")
-        topic = cfg.get("topic", "sms")
-        url = f"{server.rstrip('/')}/{topic}/sse"
-        log(f"目标: {url}")
+        cfg, _, _ = load_config()
+        server = cfg.get("server", "")
+        if not server:
+            log("[SKIP] 未配置服务器地址，跳过网络连接测试")
+        else:
+            topic = cfg.get("topic", "sms")
+            url = f"{server.rstrip('/')}/{topic}/sse"
+            log(f"目标: {url}")
 
-        resp = requests.get(
-            url,
-            auth=(cfg.get("username", ""), cfg.get("password", "")) or None,
-            timeout=10,
-            proxies={"http": None, "https": None},
-            stream=True,
-        )
-        log(f"状态码: {resp.status_code}")
-        log(f"Content-Type: {resp.headers.get('Content-Type', 'N/A')}")
-        # 读取第一批数据
-        data = next(resp.iter_lines(decode_unicode=True), None)
-        log(f"首条 SSE 数据: {data}")
-        resp.close()
+            resp = requests.get(
+                url,
+                auth=(cfg.get("username", ""), cfg.get("password", "")) or None,
+                timeout=10,
+                proxies={"http": None, "https": None},
+                stream=True,
+            )
+            log(f"状态码: {resp.status_code}")
+            log(f"Content-Type: {resp.headers.get('Content-Type', 'N/A')}")
+            # 读取第一批数据
+            line = next(resp.iter_lines(decode_unicode=True), None)
+            if line is None:
+                log("[INFO] 连接已建立，但 10s 内未收到数据")
+            else:
+                # 只记录元信息，不把消息正文写入日志
+                log(f"[INFO] 首条 SSE 数据行: {len(line)} 字节（内容不写入日志）")
+            resp.close()
     except Exception as e:
         log(f"[FAIL] 网络请求: {type(e).__name__}: {e}")
         traceback.print_exc()
@@ -142,8 +149,9 @@ def main():
     from src.config import CONFIG_FILE, load_config
     log(f"配置路径: {CONFIG_FILE}")
     log(f"配置文件存在: {CONFIG_FILE.exists()}")
-    cfg, first = load_config()
+    cfg, first, corrupt = load_config()
     log(f"首次运行: {first}")
+    log(f"配置损坏已重置: {corrupt}")
     log(f"当前配置: server={cfg.get('server')}, topic={cfg.get('topic')}, username={cfg.get('username')}")
 
     # 6. 图标文件

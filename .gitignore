@@ -26,8 +26,8 @@ desktop.ini
 .workbuddy/
 
 # Test files
-test_*.py
-test_ui.py
+/test_*.py
+/test_ui.py
 
 # Debug scripts
 analyze_svg.py

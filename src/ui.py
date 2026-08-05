@@ -6,7 +6,7 @@
 
 import sys
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from typing import Callable, Optional
 
 
@@ -278,6 +278,16 @@ class SettingsWindow:
     def _save(self):
         """保存配置并关闭窗口。"""
         cfg = self._collect_config()
+        server = str(cfg.get("server", ""))
+        password = str(cfg.get("password", ""))
+        if server.startswith("http://") and password:
+            if not messagebox.askyesno(
+                "安全提示",
+                "当前服务器地址使用 http://，密码将以明文在网络上传输，"
+                "建议改用 https://。仍要保存吗？",
+                parent=self._win,
+            ):
+                return
         try:
             self._on_save(cfg)
         except Exception as e:
@@ -301,11 +311,131 @@ class SettingsWindow:
             self._win.destroy()
 
 
+class HistoryWindow:
+    """推送历史窗口：显示最近 1000 条推送，支持刷新/清空/进入设置。"""
+
+    _WIN_W = 760
+    _WIN_H = 500
+
+    def __init__(
+        self,
+        master: Optional[tk.Tk] = None,
+        on_settings: Optional[Callable] = None,
+    ):
+        self._master = master
+        self._on_settings = on_settings
+        self._win: Optional[tk.Toplevel] = None
+        self._tree: Optional[ttk.Treeview] = None
+
+    def show(self):
+        """在主 Tk 线程中显示历史窗口（非阻塞）。"""
+        root = self._master or tk.Tk()
+        win = tk.Toplevel(root)
+        self._win = win
+        win.title("ntfy-Notifier 推送历史")
+        win.geometry(f"{self._WIN_W}x{self._WIN_H}")
+        win.minsize(560, 360)
+        win.configure(bg=_FLUENT_BG)
+
+        # 工具栏
+        toolbar = tk.Frame(win, bg=_FLUENT_BG)
+        toolbar.pack(fill="x", padx=16, pady=(12, 8))
+        self._make_button(toolbar, "刷新", self._refresh).pack(side="left")
+        self._make_button(toolbar, "清空历史", self._clear).pack(side="left", padx=(8, 0))
+        self._make_button(toolbar, "设置", self._open_settings).pack(side="right")
+
+        # 表格
+        table_frame = tk.Frame(win, bg=_FLUENT_BG)
+        table_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        columns = ("time", "title", "message")
+        self._tree = ttk.Treeview(
+            table_frame, columns=columns, show="headings", selectmode="browse"
+        )
+        self._tree.heading("time", text="时间")
+        self._tree.heading("title", text="标题")
+        self._tree.heading("message", text="内容")
+        self._tree.column("time", width=160, anchor="w")
+        self._tree.column("title", width=180, anchor="w")
+        self._tree.column("message", width=380, anchor="w")
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=scrollbar.set)
+        self._tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self._tree.bind("<Double-1>", self._copy_message)
+        win.protocol("WM_DELETE_WINDOW", self._close)
+
+        # 居中
+        win.update_idletasks()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(
+            f"{self._WIN_W}x{self._WIN_H}"
+            f"+{(sw - self._WIN_W) // 2}+{(sh - self._WIN_H) // 2}"
+        )
+        win.deiconify()
+        win.after(0, lambda: (win.lift(), win.focus_force()))
+        self._refresh()
+
+    def _make_button(self, parent: tk.Widget, text: str, command: Callable) -> tk.Button:
+        """创建扁平风格的工具栏按钮。"""
+        return tk.Button(
+            parent, text=f"  {text}  ", font=("Segoe UI", 9),
+            fg=_FLUENT_TEXT, bg=_FLUENT_SURFACE,
+            activeforeground=_FLUENT_TEXT, activebackground=_FLUENT_BORDER,
+            bd=0, cursor="hand2", relief="flat", command=command,
+        )
+
+    def _refresh(self):
+        """从数据库重新加载历史记录。"""
+        from src.history import get_messages
+        items = get_messages(limit=1000)
+        if self._tree is None:
+            return
+        for item in self._tree.get_children():
+            self._tree.delete(item)
+        for row in items:
+            self._tree.insert(
+                "", "end", values=(row["time"], row["title"], row["message"])
+            )
+
+    def _clear(self):
+        """清空历史（二次确认）。"""
+        if not messagebox.askyesno(
+            "清空历史", "确定清空全部推送历史？此操作不可恢复。", parent=self._win
+        ):
+            return
+        from src.history import clear_history
+        if clear_history():
+            self._refresh()
+
+    def _copy_message(self, _event):
+        """双击行复制消息正文到剪贴板。"""
+        if self._tree is None:
+            return
+        selection = self._tree.selection()
+        if not selection:
+            return
+        values = self._tree.item(selection[0], "values")
+        if len(values) >= 3 and self._win:
+            self._win.clipboard_clear()
+            self._win.clipboard_append(values[2])
+
+    def _open_settings(self):
+        """打开设置窗口。"""
+        if self._on_settings:
+            self._on_settings()
+
+    def _close(self):
+        """关闭历史窗口（程序保持常驻）。"""
+        if self._win and self._win.winfo_exists():
+            self._win.destroy()
+
+
 if __name__ == "__main__":
     # 独立测试入口
     test_cfg = {
         "server": "http://your-server:8080",
-        "username": "iPhone",
+        "username": "your_username",
         "password": "",
         "topic": "sms",
         "auto_start": False,
