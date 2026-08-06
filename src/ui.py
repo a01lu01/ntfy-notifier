@@ -140,6 +140,8 @@ class MainWindow:
         self._pages = {}
         self._current_page = "push"
         self._font = _font_family(master)
+        # 统一默认字体：所有未显式指定字体的控件使用同一字族
+        master.option_add("*Font", (self._font, 10))
         self._store = ColumnStateStore()
         self._build()
 
@@ -225,13 +227,15 @@ class MainWindow:
                 item.configure(bg=tokens["selected"])
                 indicator.configure(bg=tokens["accent"])
                 label.configure(
-                    bg=tokens["selected"], fg=tokens["accent_text"], font=(self._font, 11, "bold")
+                    bg=tokens["selected"], fg=tokens["accent_text"],
+                    font=(self._font, 11),
                 )
             else:
                 item.configure(bg=tokens["window_bg"])
                 indicator.configure(bg=tokens["window_bg"])
                 label.configure(
-                    bg=tokens["window_bg"], fg=tokens["text"], font=(self._font, 11)
+                    bg=tokens["window_bg"], fg=tokens["text"],
+                    font=(self._font, 11),
                 )
 
     def show_page(self, name: str):
