@@ -1,7 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Sortable from "sortablejs";
-import { cellValuesForOrder, moveInArray } from "./table-model.js";
+import {
+  cellValuesForOrder,
+  moveInArray,
+  resizeColumnBoundary
+} from "./table-model.js";
 import { columnDragOptions } from "./table-drag.js";
 
 const PAGES = [
@@ -20,6 +24,8 @@ const COLUMNS = [
   { id: "title", title: "标题" },
   { id: "message", title: "内容" }
 ];
+
+const MIN_COLUMN_WIDTHS = { time: 120, title: 80, message: 160 };
 
 function el(id) { return document.getElementById(id); }
 
@@ -138,14 +144,31 @@ function makeTableSortable() {
       e.preventDefault();
       e.stopImmediatePropagation();
       const id = th.dataset.col;
+      const nextTh = th.nextElementSibling;
+      const nextId = nextTh?.dataset.col ?? null;
       const startX = e.clientX;
       const startW = th.getBoundingClientRect().width;
+      const startNext = nextTh ? nextTh.getBoundingClientRect().width : null;
+      const minCurrent = MIN_COLUMN_WIDTHS[id] ?? 80;
+      const minNext = nextId ? MIN_COLUMN_WIDTHS[nextId] ?? 80 : null;
       const onMove = (ev) => {
         if (!resizing) return;
-        const w = Math.max(80, Math.round(startW + ev.clientX - startX));
-        th.style.width = `${w}px`;
+        const { current, next } = resizeColumnBoundary(
+          startW,
+          startNext,
+          ev.clientX - startX,
+          minCurrent,
+          minNext
+        );
+        th.style.width = `${Math.round(current)}px`;
+        if (nextTh && next != null) {
+          nextTh.style.width = `${Math.round(next)}px`;
+        }
         if (!uiState) uiState = { column_order: [], column_widths: {} };
-        uiState.column_widths[id] = w;
+        uiState.column_widths[id] = Math.round(current);
+        if (nextId && next != null) {
+          uiState.column_widths[nextId] = Math.round(next);
+        }
       };
       const onUp = () => {
         resizing = false;

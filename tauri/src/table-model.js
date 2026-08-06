@@ -16,3 +16,25 @@ export function moveInArray(items, oldIndex, newIndex) {
 export function cellValuesForOrder(order, item) {
   return order.map((id) => item?.[id] ?? "");
 }
+
+export function resizeColumnBoundary(
+  startCurrent,
+  startNext,
+  delta,
+  minCurrent,
+  minNext
+) {
+  if (startNext == null) {
+    return {
+      current: Math.max(minCurrent, startCurrent + delta),
+      next: null,
+    };
+  }
+  const minDelta = minCurrent - startCurrent;
+  const maxDelta = startNext - minNext;
+  const adjustedDelta = Math.min(Math.max(delta, minDelta), maxDelta);
+  return {
+    current: startCurrent + adjustedDelta,
+    next: startNext - adjustedDelta,
+  };
+}
