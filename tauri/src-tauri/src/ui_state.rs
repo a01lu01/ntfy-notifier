@@ -10,6 +10,15 @@ const DEFAULT_WIDTHS: [(&str, i64); 3] = [("time", 180), ("title", 220), ("messa
 const MIN_WIDTHS: [(&str, i64); 3] = [("time", 120), ("title", 80), ("message", 160)];
 static APP_DATA_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
+fn standard_column_id(legacy: &str) -> String {
+    match legacy {
+        "时间" => "time".to_string(),
+        "标题" => "title".to_string(),
+        "内容" => "message".to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 fn set_test_dir(dir: PathBuf) {
     *APP_DATA_OVERRIDE.lock().unwrap() = Some(dir);
@@ -60,14 +69,23 @@ pub fn load() -> UiState {
         Ok(s) => s,
         Err(_) => return default,
     };
+    // 兼容早期版本用中文标题作为列 ID 的 ui_state.json
+    let mut order: Vec<String> = parsed
+        .column_order
+        .iter()
+        .map(|id| standard_column_id(id))
+        .collect();
+    let mut widths: HashMap<String, i64> = parsed
+        .column_widths
+        .iter()
+        .map(|(id, w)| (standard_column_id(id), *w))
+        .collect();
     // 补全缺失列并约束最小宽度
-    let mut order = parsed.column_order;
     for col in DEFAULT_ORDER {
         if !order.iter().any(|c| c == col) {
             order.push(col.to_string());
         }
     }
-    let mut widths = parsed.column_widths;
     for (col, min) in MIN_WIDTHS {
         let w = widths.get(col).copied().unwrap_or(0);
         widths.insert(col.to_string(), w.max(min));
@@ -98,10 +116,13 @@ pub fn save(order: Vec<String>, widths: HashMap<String, i64>) -> Result<(), Stri
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, MutexGuard};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn unique_env() {
+    fn unique_env() -> MutexGuard<'static, ()> {
+        let guard = TEST_LOCK.lock().unwrap();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
             "ntfy-test-uistate-{}-{}",
@@ -111,18 +132,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         set_test_dir(dir);
+        guard
     }
 
     #[test]
     fn default_when_missing() {
-        unique_env();
+        let _guard = unique_env();
         let s = load();
         assert_eq!(s.column_order.len(), 3);
     }
 
     #[test]
     fn roundtrip_and_clamp() {
-        unique_env();
+        let _guard = unique_env();
         let mut widths = HashMap::new();
         widths.insert("time".to_string(), 10);
         widths.insert("message".to_string(), 99999);
@@ -131,5 +153,22 @@ mod tests {
         assert_eq!(s.column_widths["time"], 120);
         assert_eq!(s.column_widths["message"], 99999);
         assert_eq!(s.column_order[0], "message");
+    }
+
+    #[test]
+    fn migrates_legacy_chinese_column_order_and_widths() {
+        let _guard = unique_env();
+        let path = state_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"column_order":["内容","标题","时间"],"column_widths":{"内容":300,"标题":200,"时间":150}}"#,
+        )
+        .unwrap();
+        let s = load();
+        assert_eq!(s.column_order, vec!["message", "title", "time"]);
+        assert_eq!(s.column_widths["message"], 300);
+        assert_eq!(s.column_widths["title"], 200);
+        assert_eq!(s.column_widths["time"], 150);
     }
 }

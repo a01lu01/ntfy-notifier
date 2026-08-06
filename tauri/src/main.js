@@ -1,5 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import Sortable from "sortablejs";
+import { cellValuesForOrder, moveInArray } from "./table-model.js";
+import { columnDragOptions } from "./table-drag.js";
 
 const PAGES = [
   { id: "push", label: "推送" },
@@ -64,9 +67,17 @@ async function refreshPush() {
   }
   el("push-empty").hidden = true;
   table.hidden = false;
+  const order =
+    uiState?.column_order?.length > 0
+      ? uiState.column_order
+      : COLUMNS.map((c) => c.id);
   for (const m of messages) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${m.time}</td><td>${m.title || ""}</td><td>${m.message || ""}</td>`;
+    for (const value of cellValuesForOrder(order, m)) {
+      const td = document.createElement("td");
+      td.textContent = value;
+      tr.appendChild(td);
+    }
     tr.addEventListener("dblclick", () => navigator.clipboard.writeText(m.message || ""));
     tbody.appendChild(tr);
   }
@@ -110,78 +121,57 @@ function buildPushPage() {
   makeTableSortable();
 }
 
-/* 列拖放排序 + 右侧拖柄调整列宽 */
+/* SortableJS 列排序 + 右侧拖柄调整列宽 */
 function makeTableSortable() {
   const table = pushTable;
   if (!table) return;
-  let dragId = null;
 
   table.querySelectorAll("th").forEach((th) => {
-    th.draggable = true;
-    th.addEventListener("dragstart", (e) => {
-      dragId = th.dataset.col;
-      e.dataTransfer.effectAllowed = "move";
-      th.classList.add("drag-over");
-    });
-    th.addEventListener("dragend", () => {
-      dragId = null;
-      table.querySelectorAll("th").forEach((t) => t.classList.remove("drag-over"));
-    });
-    th.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      if (dragId && dragId !== th.dataset.col) th.classList.add("drag-over");
-    });
-    th.addEventListener("dragleave", () => th.classList.remove("drag-over"));
-    th.addEventListener("drop", (e) => {
-      e.preventDefault();
-      th.classList.remove("drag-over");
-      if (!dragId || dragId === th.dataset.col) return;
-      moveColumn(dragId, th.dataset.col);
-      persistColumns();
-    });
-
     // 右侧列宽拖柄（与列排序互不干扰）
     const handle = document.createElement("span");
     handle.className = "resize-handle";
     th.appendChild(handle);
-    handle.addEventListener("mousedown", (e) => {
+    let resizing = false;
+    const startResize = (e) => {
+      if (resizing) return;
+      resizing = true;
       e.preventDefault();
-      e.stopPropagation();
+      e.stopImmediatePropagation();
       const id = th.dataset.col;
       const startX = e.clientX;
       const startW = th.getBoundingClientRect().width;
       const onMove = (ev) => {
+        if (!resizing) return;
         const w = Math.max(80, Math.round(startW + ev.clientX - startX));
         th.style.width = `${w}px`;
         if (!uiState) uiState = { column_order: [], column_widths: {} };
         uiState.column_widths[id] = w;
       };
       const onUp = () => {
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
+        resizing = false;
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onUp);
         persistColumns();
       };
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    });
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onUp);
+    };
+    handle.addEventListener("pointerdown", startResize);
+    handle.addEventListener("mousedown", startResize);
   });
-}
 
-function moveColumn(fromId, toId) {
-  const table = pushTable;
-  if (!table) return;
-  const head = table.tHead.rows[0];
-  const fromTh = head.querySelector(`th[data-col="${fromId}"]`);
-  const toTh = head.querySelector(`th[data-col="${toId}"]`);
-  if (!fromTh || !toTh) return;
-  const cells = Array.from(head.cells);
-  const fi = cells.indexOf(fromTh);
-  const ti = cells.indexOf(toTh);
-  head.insertBefore(fromTh, ti > fi ? toTh.nextSibling : toTh);
-  for (const row of table.tBodies[0].rows) {
-    const rowCells = Array.from(row.cells);
-    row.insertBefore(rowCells[fi], ti > fi ? rowCells[ti].nextSibling : rowCells[ti]);
-  }
+  Sortable.create(
+    table.tHead.rows[0],
+    columnDragOptions((evt) => {
+      const { oldIndex, newIndex } = evt;
+      if (oldIndex == null || newIndex == null || oldIndex === newIndex) return;
+      for (const row of table.tBodies[0].rows) {
+        const ordered = moveInArray(Array.from(row.cells), oldIndex, newIndex);
+        ordered.forEach((cell) => row.appendChild(cell));
+      }
+      persistColumns();
+    })
+  );
 }
 
 async function persistColumns() {

@@ -128,10 +128,13 @@ pub fn clear_history() -> Result<(), String> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::MutexGuard;
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn unique_env() {
+    fn unique_env() -> MutexGuard<'static, ()> {
+        let guard = TEST_LOCK.lock().unwrap();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
             "ntfy-test-history-{}-{}",
@@ -141,11 +144,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         set_test_dir(dir);
+        guard
     }
 
     #[test]
     fn record_and_dedup() {
-        unique_env();
+        let _guard = unique_env();
         assert!(record_message("1", "sms", "t", "m").unwrap());
         assert!(!record_message("1", "sms", "t", "m").unwrap());
         let items = get_messages(10);
@@ -154,7 +158,7 @@ mod tests {
 
     #[test]
     fn prune_to_1000() {
-        unique_env();
+        let _guard = unique_env();
         clear_history().unwrap();
         for i in 0..1005 {
             record_message(&i.to_string(), "sms", &format!("t{i}"), "m").unwrap();
