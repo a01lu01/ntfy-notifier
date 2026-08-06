@@ -120,6 +120,15 @@ function makeTableSortable() {
         const cells = Array.from(head.cells);
         if (dragCol < cells.length && index < cells.length) {
           head.insertBefore(cells[dragCol], cells[index + (index > dragCol ? 1 : 0)]);
+          for (const row of table.tBodies[0].rows) {
+            const rowCells = Array.from(row.cells);
+            if (dragCol < rowCells.length && index < rowCells.length) {
+              row.insertBefore(
+                rowCells[dragCol],
+                rowCells[index + (index > dragCol ? 1 : 0)]
+              );
+            }
+          }
           dragCol = index;
         }
       }
@@ -143,7 +152,11 @@ function fillSettings() {
   el("set-username").value = config.username || "";
   el("set-password").value = config.password || "";
   el("set-topic").value = config.topic || "";
-  el("set-theme").value = config.theme_mode || "system";
+  const theme = config.theme_mode || "system";
+  el("set-theme").dataset.value = theme;
+  el("set-theme").querySelectorAll(".seg-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.value === theme);
+  });
   el("set-autostart").checked = !!config.auto_start;
   el("set-autocopy").checked = !!config.auto_copy_otp;
 }
@@ -166,14 +179,26 @@ function buildSettingsPage() {
       <h3>行为</h3>
       <div class="field">
         <label>界面主题</label>
-        <select id="set-theme">
-          <option value="system">跟随系统</option>
-          <option value="light">浅色</option>
-          <option value="dark">深色</option>
-        </select>
+        <div class="segmented" id="set-theme" data-value="system">
+          <button type="button" class="seg-btn" data-value="system">跟随系统</button>
+          <button type="button" class="seg-btn" data-value="light">浅色</button>
+          <button type="button" class="seg-btn" data-value="dark">深色</button>
+        </div>
       </div>
-      <div class="checkbox-row"><input type="checkbox" id="set-autostart"><label for="set-autostart">开机自启动</label></div>
-      <div class="checkbox-row"><input type="checkbox" id="set-autocopy"><label for="set-autocopy">收到短信时自动复制验证码到剪贴板</label></div>
+      <div class="switch-row">
+        <span>开机自启动</span>
+        <label class="switch">
+          <input type="checkbox" id="set-autostart">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="switch-row">
+        <span>收到短信时自动复制验证码到剪贴板</span>
+        <label class="switch">
+          <input type="checkbox" id="set-autocopy">
+          <span class="slider"></span>
+        </label>
+      </div>
     </div>
     <div class="toolbar" style="justify-content:flex-end">
       <button class="btn btn-secondary" id="btn-cancel">取消</button>
@@ -182,13 +207,14 @@ function buildSettingsPage() {
   `;
   el("btn-cancel").addEventListener("click", fillSettings);
   el("btn-save").addEventListener("click", async () => {
+    const themeMode = el("set-theme").dataset.value || "system";
     const next = {
       ...config,
       server: el("set-server").value.trim(),
       username: el("set-username").value.trim(),
       password: el("set-password").value,
       topic: el("set-topic").value.trim(),
-      theme_mode: el("set-theme").value,
+      theme_mode: themeMode,
       auto_start: el("set-autostart").checked,
       auto_copy_otp: el("set-autocopy").checked
     };
@@ -197,6 +223,14 @@ function buildSettingsPage() {
     }
     config = await invoke("save_config", { config: next });
     applyTheme();
+  });
+  el("set-theme").querySelectorAll(".seg-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      el("set-theme").dataset.value = btn.dataset.value;
+      el("set-theme").querySelectorAll(".seg-btn").forEach((b) => {
+        b.classList.toggle("active", b === btn);
+      });
+    });
   });
 }
 
