@@ -105,7 +105,7 @@ pub fn run() {
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .show_menu_on_left_click(false)
+                .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "push" => show_main(app, "push"),
                     "settings" => show_main(app, "settings"),
