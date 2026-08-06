@@ -24,15 +24,24 @@ COLUMN_TITLES = {"time": "时间", "title": "标题", "message": "内容"}
 
 
 def _font_family(root: tk.Misc) -> str:
-    """优先 Segoe UI Variable Text，回退 Segoe UI。"""
+    """自动识别系统 UI 字体。
+
+    优先 Win11 的 Segoe UI Variable Text，其次 Segoe UI，
+    最后回退到 Tk 从系统读取的默认字体族。
+    """
     try:
         import tkinter.font as tkfont
         families = set(tkfont.families(root))
-        if "Segoe UI Variable Text" in families:
-            return "Segoe UI Variable Text"
+        for candidate in (
+            "Segoe UI Variable Text",
+            "Segoe UI Variable",
+            "Segoe UI",
+        ):
+            if candidate in families:
+                return candidate
+        return tkfont.nametofont("TkDefaultFont").actual("family")
     except Exception:
-        pass
-    return "Segoe UI"
+        return "TkDefaultFont"
 
 
 def _parent_bg(widget: tk.Widget, tokens: dict) -> str:
