@@ -71,7 +71,7 @@
 
 ### 4.1 主窗口尺寸与 DPI
 
-- 默认尺寸 880×560（逻辑单位），最小 720×480，启动居中
+- 默认尺寸 1350×800（逻辑单位，参照 optimizerDuck），最小 900×500，启动居中
 - 启动时声明 Per-Monitor V2 感知：优先 `SetProcessDpiAwarenessContext(-4)`，失败降级 `SetProcessDpiAwareness(2)` / `SetProcessDPIAware()`
 - 用 `GetDpiForWindow / 96` 计算缩放因子，同步设置 `tk scaling`，窗口与控件尺寸乘以缩放因子
 - exe 清单同时声明 `dpiAwareness = PerMonitorV2, PerMonitor`
@@ -116,7 +116,7 @@
 ## 6. 表格列记忆
 
 - 存储位置：`%APPDATA%\ntfy-notifier\ui_state.json`（与连接配置分开）
-- 内容：`{"column_order": ["time", "title", "message"], "column_widths": {"time": 120, "title": 140, "message": 420}}`
+- 内容：`{"column_order": ["time", "title", "message"], "column_widths": {"time": 180, "title": 220, "message": 640}}`
 - 写入：鼠标释放时保存，采用临时文件 + `os.replace` 原子写入
 - 读取：启动/打开推送页时恢复；文件损坏或字段缺失时回退默认列配置并重建
 - 最小列宽：时间 120 / 标题 80 / 内容 160（逻辑单位），防止拖没
