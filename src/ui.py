@@ -3,6 +3,7 @@
 单主窗口 + 左侧导航（推送 / 设置 / 关于），支持深浅色主题。
 """
 
+import os
 import sys
 import tkinter as tk
 import webbrowser
@@ -23,20 +24,52 @@ GITHUB_URL = "https://github.com/a01lu01/ntfy-notifier"
 COLUMN_TITLES = {"time": "时间", "title": "标题", "message": "内容"}
 
 
-def _font_family(root: tk.Misc) -> str:
-    """自动识别系统 UI 字体。
+_CUSTOM_FONT_REGISTERED = ""
 
-    优先 Win11 的 Segoe UI Variable Text，其次 Segoe UI，
-    最后回退到 Tk 从系统读取的默认字体族。
-    """
+
+def _font_path() -> str:
+    """返回随程序打包的字体文件路径（源码与 exe 环境均可）。"""
+    try:
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            candidate = os.path.join(
+                sys._MEIPASS, "assets", "fonts", "HarmonyOS_Sans_Regular.ttf"
+            )
+            if os.path.exists(candidate):
+                return candidate
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base, "assets", "fonts", "HarmonyOS_Sans_Regular.ttf")
+    except Exception:
+        return ""
+
+
+def _register_custom_font() -> str:
+    """以进程私有方式注册 HarmonyOS Sans，返回可用字体族名。"""
+    global _CUSTOM_FONT_REGISTERED
+    if _CUSTOM_FONT_REGISTERED:
+        return _CUSTOM_FONT_REGISTERED
+    path = _font_path()
+    if path and os.path.exists(path):
+        try:
+            import ctypes
+            if ctypes.windll.gdi32.AddFontResourceExW(path, 0x10, 0) > 0:
+                _CUSTOM_FONT_REGISTERED = "HarmonyOS Sans SC"
+        except Exception:
+            pass
+    return _CUSTOM_FONT_REGISTERED
+
+
+def _font_family(root: tk.Misc) -> str:
+    """自动识别 UI 字体：优先 HarmonyOS Sans，其次系统 UI 字体。"""
+    custom = _register_custom_font()
     try:
         import tkinter.font as tkfont
         families = set(tkfont.families(root))
-        for candidate in (
-            "Segoe UI Variable Text",
-            "Segoe UI Variable",
-            "Segoe UI",
-        ):
+        candidates = []
+        if custom:
+            candidates.append(custom)
+            candidates.append("HarmonyOS Sans")
+        candidates.extend(("Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI"))
+        for candidate in candidates:
             if candidate in families:
                 return candidate
         return tkfont.nametofont("TkDefaultFont").actual("family")
@@ -48,7 +81,7 @@ def _parent_bg(widget: tk.Widget, tokens: dict) -> str:
     """根据父容器角色决定背景色（卡片内用卡片底色）。"""
     parent = getattr(widget, "master", None)
     parent_role = getattr(parent, "_theme_role", None) if parent is not None else None
-    if parent_role == "card":
+    if parent_role in ("card", "card_inner"):
         return tokens["card_bg"]
     return tokens["window_bg"]
 
@@ -148,6 +181,7 @@ class MainWindow:
         self._nav_items = {}
         self._pages = {}
         self._current_page = "push"
+        _register_custom_font()
         self._font = _font_family(master)
         # 统一默认字体：所有未显式指定字体的控件使用同一字族
         master.option_add("*Font", (self._font, 10))
@@ -468,6 +502,7 @@ class PushPage:
             fieldbackground=tokens["card_bg"],
             foreground=tokens["text"],
             borderwidth=0,
+            relief="flat",
             rowheight=self._sc(30),
             font=(self._font, 10),
         )
@@ -481,6 +516,9 @@ class PushPage:
             background=tokens["hover"],
             foreground=tokens["text"],
             relief="flat",
+            borderwidth=0,
+            lightcolor=tokens["border"],
+            darkcolor=tokens["border"],
             font=(self._font, 10, "bold"),
             padding=(self._sc(6), self._sc(4)),
         )
@@ -490,19 +528,37 @@ class PushPage:
         )
         style.configure(
             "Push.Vertical.TScrollbar",
-            background=tokens["card_bg"],
+            background=tokens["selected"],
             troughcolor=tokens["window_bg"],
             bordercolor=tokens["window_bg"],
-            arrowcolor=tokens["text"],
+            arrowcolor=tokens["subtext"],
             relief="flat",
+            borderwidth=0,
+            lightcolor=tokens["window_bg"],
+            darkcolor=tokens["window_bg"],
+            width=self._sc(10),
+        )
+        style.map(
+            "Push.Vertical.TScrollbar",
+            background=[("active", tokens["accent"])],
+            arrowcolor=[("active", tokens["text"])],
         )
         style.configure(
             "Push.Horizontal.TScrollbar",
-            background=tokens["card_bg"],
+            background=tokens["selected"],
             troughcolor=tokens["window_bg"],
             bordercolor=tokens["window_bg"],
-            arrowcolor=tokens["text"],
+            arrowcolor=tokens["subtext"],
             relief="flat",
+            borderwidth=0,
+            lightcolor=tokens["window_bg"],
+            darkcolor=tokens["window_bg"],
+            width=self._sc(10),
+        )
+        style.map(
+            "Push.Horizontal.TScrollbar",
+            background=[("active", tokens["accent"])],
+            arrowcolor=[("active", tokens["text"])],
         )
 
 

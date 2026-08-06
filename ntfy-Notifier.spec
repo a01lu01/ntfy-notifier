@@ -66,6 +66,7 @@ _datas = [
     ('src', 'src'),
     ('connected.ico',   '.'),
     ('disconnected.ico','.'),
+    ('assets/fonts/HarmonyOS_Sans_Regular.ttf', 'assets/fonts'),
     # tcl/tk 运行时
     (os.path.join(PY_TCL, 'tcl8.6'), 'tcl8.6'),
     (os.path.join(PY_TCL, 'tk8.6'),  'tk8.6'),
