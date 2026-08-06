@@ -9,6 +9,13 @@ const PAGES = [
 
 let currentPage = "push";
 let config = null;
+let uiState = null;
+
+const COLUMNS = [
+  { id: "time", title: "时间" },
+  { id: "title", title: "标题" },
+  { id: "message", title: "内容" }
+];
 
 function el(id) { return document.getElementById(id); }
 
@@ -87,11 +94,15 @@ function buildPushPage() {
       refreshPush();
     }
   });
+  const order = uiState?.column_order || COLUMNS.map((c) => c.id);
+  const widths = uiState?.column_widths || {};
   const head = el("push-head");
-  const cols = ["时间", "标题", "内容"];
-  for (const c of cols) {
+  for (const id of order) {
+    const col = COLUMNS.find((c) => c.id === id);
     const th = document.createElement("th");
-    th.textContent = c;
+    th.textContent = col ? col.title : id;
+    th.dataset.col = id;
+    if (widths[id]) th.style.width = `${widths[id]}px`;
     head.appendChild(th);
   }
   makeTableSortable();
@@ -117,8 +128,9 @@ function makeTableSortable() {
   document.addEventListener("mouseup", async () => {
     if (dragCol !== null) {
       dragCol = null;
-      const order = Array.from(table.tHead.rows[0].cells).map((th) => th.textContent);
-      await invoke("save_ui_state", { order, widths: {} });
+      const order = Array.from(table.tHead.rows[0].cells).map((th) => th.dataset.col);
+      const widths = uiState?.column_widths || {};
+      uiState = await invoke("save_ui_state", { order, widths });
     }
   });
 }
@@ -204,6 +216,7 @@ function buildAboutPage() {
 
 async function init() {
   config = await invoke("get_config");
+  uiState = await invoke("get_ui_state");
   applyTheme();
   buildNav();
   buildPushPage();

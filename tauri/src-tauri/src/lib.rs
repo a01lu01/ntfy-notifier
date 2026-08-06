@@ -55,8 +55,9 @@ fn get_ui_state() -> ui_state::UiState {
 fn save_ui_state(
     order: Vec<String>,
     widths: HashMap<String, i64>,
-) -> Result<(), String> {
-    ui_state::save(order, widths)
+) -> Result<ui_state::UiState, String> {
+    ui_state::save(order, widths)?;
+    Ok(ui_state::load())
 }
 
 fn show_main(app: &AppHandle, page: &str) {
