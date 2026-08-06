@@ -8,8 +8,11 @@ mod startup;
 mod ui_state;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
 
 pub struct AppState {
@@ -69,6 +72,85 @@ fn show_main(app: &AppHandle, page: &str) {
     let _ = app.emit("navigate", page);
 }
 
+#[derive(Default)]
+struct TrayClickState {
+    generation: AtomicU64,
+    last_double_click: Mutex<Option<Instant>>,
+}
+
+impl TrayClickState {
+    fn is_recent_double_click(&self) -> bool {
+        self.last_double_click
+            .lock()
+            .map(|last| {
+                last.is_some_and(|t| t.elapsed() < Duration::from_millis(500))
+            })
+            .unwrap_or(false)
+    }
+
+    fn next_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1)
+    }
+
+    fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn on_double_click(&self, app: &AppHandle) {
+        *self.last_double_click.lock().unwrap() = Some(Instant::now());
+        self.invalidate();
+        show_main(app, "push");
+    }
+
+    fn on_left_up(self: &Arc<Self>, tray: TrayIcon<tauri::Wry>) {
+        if self.is_recent_double_click() {
+            return;
+        }
+        let generation = self.next_generation();
+        let state = Arc::clone(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            if state.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            if state.is_recent_double_click() {
+                return;
+            }
+            let _ = tray.with_inner_tray_icon(|inner| inner.show_menu());
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn recent_double_click_ignores_single_click() {
+        let state = TrayClickState::default();
+        *state.last_double_click.lock().unwrap() = Some(Instant::now());
+        assert!(state.is_recent_double_click());
+    }
+
+    #[test]
+    fn stale_double_click_allows_single_click() {
+        let state = TrayClickState::default();
+        *state.last_double_click.lock().unwrap() =
+            Some(Instant::now() - Duration::from_millis(600));
+        assert!(!state.is_recent_double_click());
+    }
+
+    #[test]
+    fn generation_change_invalidates_pending_menu() {
+        let state = TrayClickState::default();
+        let generation = state.next_generation();
+        state.invalidate();
+        assert_ne!(state.generation.load(Ordering::SeqCst), generation);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -101,24 +183,37 @@ pub fn run() {
             let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&push, &settings, &quit])?;
+            let click_state = Arc::new(TrayClickState::default());
 
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .show_menu_on_left_click(true)
+                .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "push" => show_main(app, "push"),
                     "settings" => show_main(app, "settings"),
                     "quit" => app.exit(0),
                     _ => {}
                 })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::DoubleClick {
-                        button: MouseButton::Left,
-                        ..
-                    } = event
-                    {
-                        show_main(tray.app_handle(), "push");
+                .on_tray_icon_event(move |tray, event| {
+                    match event {
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } => {
+                            click_state.on_left_up(tray.clone());
+                        }
+                        TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        } => {
+                            click_state.on_double_click(tray.app_handle());
+                        }
+                        TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. } => {
+                            click_state.invalidate();
+                        }
+                        _ => {}
                     }
                 })
                 .build(app)?;
