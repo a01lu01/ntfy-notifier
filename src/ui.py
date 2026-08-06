@@ -24,15 +24,24 @@ COLUMN_TITLES = {"time": "时间", "title": "标题", "message": "内容"}
 
 
 def _font_family(root: tk.Misc) -> str:
-    """优先 Segoe UI Variable，回退 Segoe UI。"""
+    """优先 Segoe UI Variable Text，回退 Segoe UI。"""
     try:
         import tkinter.font as tkfont
         families = set(tkfont.families(root))
-        if "Segoe UI Variable" in families:
-            return "Segoe UI Variable"
+        if "Segoe UI Variable Text" in families:
+            return "Segoe UI Variable Text"
     except Exception:
         pass
     return "Segoe UI"
+
+
+def _parent_bg(widget: tk.Widget, tokens: dict) -> str:
+    """根据父容器角色决定背景色（卡片内用卡片底色）。"""
+    parent = getattr(widget, "master", None)
+    parent_role = getattr(parent, "_theme_role", None) if parent is not None else None
+    if parent_role == "card":
+        return tokens["card_bg"]
+    return tokens["window_bg"]
 
 
 def _walk_apply(widget: tk.Widget, tokens: dict):
@@ -43,18 +52,25 @@ def _walk_apply(widget: tk.Widget, tokens: dict):
         if cls == "Frame":
             bg_map = {
                 "card": "card_bg",
+                "card_inner": "card_bg",
                 "toolbar": "window_bg",
                 "input_border": "input_border",
                 "input_inner": "input_bg",
             }
             child.configure(bg=tokens.get(bg_map.get(role, "window_bg")))
+            if role == "card":
+                child.configure(
+                    highlightbackground=tokens["border"],
+                    highlightcolor=tokens["border"],
+                    highlightthickness=1,
+                )
         elif cls == "Label":
             fg = tokens["text"]
             if role in ("subtitle", "subtext"):
                 fg = tokens["subtext"]
             elif role in ("accent", "link"):
                 fg = tokens["accent_text"]
-            child.configure(bg=tokens["window_bg"], fg=fg)
+            child.configure(bg=_parent_bg(child, tokens), fg=fg)
         elif cls == "Button":
             if role == "accent":
                 child.configure(
@@ -68,7 +84,10 @@ def _walk_apply(widget: tk.Widget, tokens: dict):
                 )
             else:
                 child.configure(
-                    bg=tokens["card_bg"], fg=tokens["text"],
+                    bg=_parent_bg(child, tokens), fg=tokens["text"],
+                    highlightbackground=tokens["border"],
+                    highlightcolor=tokens["border"],
+                    highlightthickness=1,
                     activebackground=tokens["hover"], activeforeground=tokens["text"],
                 )
         elif cls == "Entry":
@@ -78,8 +97,8 @@ def _walk_apply(widget: tk.Widget, tokens: dict):
             )
         elif cls in ("Checkbutton", "Radiobutton"):
             child.configure(
-                bg=tokens["window_bg"], fg=tokens["text"],
-                activebackground=tokens["window_bg"],
+                bg=_parent_bg(child, tokens), fg=tokens["text"],
+                activebackground=_parent_bg(child, tokens),
                 activeforeground=tokens["text"],
                 selectcolor=tokens["card_bg"],
             )
@@ -87,14 +106,16 @@ def _walk_apply(widget: tk.Widget, tokens: dict):
 
 
 def _apply_window_style(win: tk.Toplevel, tokens: dict):
-    """应用 pywinstyles 的 Win11 圆角与标题栏明暗；失败则忽略。"""
+    """应用 pywinstyles 的标题栏明暗、标题栏/边框/标题文字颜色。"""
     try:
         import pywinstyles
-        pywinstyles.apply_style(win, "win11")
-        pywinstyles.apply_style(win, "dark" if tokens is DARK else "light")
+        is_dark = tokens is DARK
+        pywinstyles.apply_style(win, "dark" if is_dark else "light")
         pywinstyles.change_header_color(win, tokens["window_bg"])
-    except Exception:
-        pass
+        pywinstyles.change_border_color(win, tokens["border"])
+        pywinstyles.change_title_color(win, tokens["text"])
+    except Exception as e:
+        print(f"[ui] 窗口样式应用失败（不影响功能）: {e}", file=sys.stderr)
 
 
 class MainWindow:
@@ -237,6 +258,8 @@ class MainWindow:
         self._win.deiconify()
         self._win.lift()
         self._win.focus_force()
+        tokens = DARK if self._theme.current == "dark" else LIGHT
+        _apply_window_style(self._win, tokens)
 
     def hide(self):
         if self._win is not None:
@@ -274,9 +297,16 @@ class PushPage:
         self.frame = tk.Frame(parent, bg=DARK["window_bg"])
         self.frame._theme_role = "window"
 
+        header = tk.Label(
+            self.frame, text="推送", font=(self._font, 15, "bold"),
+            bg=DARK["window_bg"], fg=DARK["text"], anchor="w",
+        )
+        header._theme_role = "title"
+        header.pack(fill="x", padx=self._sc(16), pady=(self._sc(16), 0))
+
         toolbar = tk.Frame(self.frame, bg=DARK["window_bg"])
         toolbar._theme_role = "toolbar"
-        toolbar.pack(fill="x", padx=self._sc(16), pady=self._sc(12))
+        toolbar.pack(fill="x", padx=self._sc(16), pady=(self._sc(8), self._sc(12)))
         self._btn_refresh = self._make_button(toolbar, "刷新", self.refresh)
         self._btn_refresh.pack(side="left")
         self._btn_clear = self._make_button(toolbar, "清空", self._clear)
@@ -294,8 +324,14 @@ class PushPage:
             table_frame, columns=self._order, show="headings", selectmode="browse",
             style="Push.Treeview",
         )
-        vscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self._tree.yview)
-        hscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self._tree.xview)
+        vscroll = ttk.Scrollbar(
+            table_frame, orient="vertical", command=self._tree.yview,
+            style="Push.Vertical.TScrollbar",
+        )
+        hscroll = ttk.Scrollbar(
+            table_frame, orient="horizontal", command=self._tree.xview,
+            style="Push.Horizontal.TScrollbar",
+        )
         self._tree.configure(yscrollcommand=vscroll.set, xscrollcommand=hscroll.set)
         self._tree.grid(row=0, column=0, sticky="nsew")
         vscroll.grid(row=0, column=1, sticky="ns")
@@ -439,6 +475,22 @@ class PushPage:
             "Push.Treeview.Heading",
             background=[("active", tokens["selected"])],
         )
+        style.configure(
+            "Push.Vertical.TScrollbar",
+            background=tokens["card_bg"],
+            troughcolor=tokens["window_bg"],
+            bordercolor=tokens["window_bg"],
+            arrowcolor=tokens["text"],
+            relief="flat",
+        )
+        style.configure(
+            "Push.Horizontal.TScrollbar",
+            background=tokens["card_bg"],
+            troughcolor=tokens["window_bg"],
+            bordercolor=tokens["window_bg"],
+            arrowcolor=tokens["text"],
+            relief="flat",
+        )
 
 
 class SettingsPage:
@@ -459,71 +511,78 @@ class SettingsPage:
         self._theme = theme_manager
         self._current = dict(config)
         self._entries = {}
+        self._borders = {}
         self._pwd_visible = False
 
         self.frame = tk.Frame(parent, bg=DARK["window_bg"])
         self.frame._theme_role = "window"
 
-        content = tk.Frame(self.frame, bg=DARK["window_bg"])
-        content.pack(fill="both", expand=True, padx=self._sc(40), pady=self._sc(24))
+        outer = tk.Frame(self.frame, bg=DARK["window_bg"])
+        outer.pack(fill="both", expand=True, padx=self._sc(40), pady=self._sc(20))
 
         tk.Label(
-            content, text="设置", font=(self._font, 15, "bold"),
+            outer, text="设置", font=(self._font, 15, "bold"),
             bg=DARK["window_bg"], fg=DARK["text"], anchor="w",
         ).pack(anchor="w")
         tk.Label(
-            content, text="配置 ntfy-Notifier 连接参数", font=(self._font, 10),
+            outer, text="配置 ntfy-Notifier 连接参数", font=(self._font, 10),
             bg=DARK["window_bg"], fg=DARK["subtext"], anchor="w",
-        ).pack(anchor="w", pady=(self._sc(2), self._sc(16)))
+        ).pack(anchor="w", pady=(self._sc(2), self._sc(12)))
 
-        self._build_input(content, "服务器地址", "server", placeholder="https://...")
+        # 连接卡片
+        connect_card = self._make_card(outer, "连接")
+        self._build_input(connect_card, "服务器地址", "server", placeholder="https://...")
 
-        pair = tk.Frame(content, bg=DARK["window_bg"])
+        pair = tk.Frame(connect_card, bg=DARK["card_bg"])
+        pair._theme_role = "card_inner"
         pair.pack(fill="x")
-        left = tk.Frame(pair, bg=DARK["window_bg"])
+        left = tk.Frame(pair, bg=DARK["card_bg"])
+        left._theme_role = "card_inner"
         left.pack(side="left", fill="x", expand=True, padx=(0, self._sc(6)))
-        right = tk.Frame(pair, bg=DARK["window_bg"])
+        right = tk.Frame(pair, bg=DARK["card_bg"])
+        right._theme_role = "card_inner"
         right.pack(side="left", fill="x", expand=True, padx=(self._sc(6), 0))
         self._build_input(left, "用户名", "username")
         self._build_input(right, "密码", "password", is_password=True)
 
-        self._build_input(content, "主题", "topic", placeholder="sms")
+        self._build_input(connect_card, "主题", "topic", placeholder="sms")
 
-        # 界面主题
+        # 行为卡片
+        behavior_card = self._make_card(outer, "行为")
         theme_label = tk.Label(
-            content, text="界面主题", font=(self._font, 10),
-            bg=DARK["window_bg"], fg=DARK["subtext"], anchor="w",
+            behavior_card, text="界面主题", font=(self._font, 10),
+            bg=DARK["card_bg"], fg=DARK["subtext"], anchor="w",
         )
         theme_label._theme_role = "subtext"
-        theme_label.pack(anchor="w", pady=(self._sc(12), self._sc(4)))
+        theme_label.pack(anchor="w", pady=(0, self._sc(4)))
         self._var_theme = tk.StringVar(value=self._current.get("theme_mode", "system"))
-        theme_row = tk.Frame(content, bg=DARK["window_bg"])
+        theme_row = tk.Frame(behavior_card, bg=DARK["card_bg"])
+        theme_row._theme_role = "card_inner"
         theme_row.pack(anchor="w")
         for value, text in (("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
             tk.Radiobutton(
                 theme_row, text=text, value=value, variable=self._var_theme,
                 font=(self._font, 10), cursor="hand2",
-                bg=DARK["window_bg"], fg=DARK["text"],
-                activebackground=DARK["window_bg"], activeforeground=DARK["text"],
+                bg=DARK["card_bg"], fg=DARK["text"],
+                activebackground=DARK["card_bg"], activeforeground=DARK["text"],
                 selectcolor=DARK["card_bg"],
             ).pack(side="left", padx=(0, self._sc(16)))
 
-        # 行为选项
         self._var_auto_start = tk.BooleanVar(value=self._current.get("auto_start", False))
         cb = tk.Checkbutton(
-            content, text="开机自启动", font=(self._font, 10),
+            behavior_card, text="开机自启动", font=(self._font, 10),
             variable=self._var_auto_start, cursor="hand2",
-            bg=DARK["window_bg"], fg=DARK["text"],
-            activebackground=DARK["window_bg"], activeforeground=DARK["text"],
+            bg=DARK["card_bg"], fg=DARK["text"],
+            activebackground=DARK["card_bg"], activeforeground=DARK["text"],
             selectcolor=DARK["card_bg"],
         )
-        cb.pack(anchor="w", pady=(self._sc(12), 0))
+        cb.pack(anchor="w", pady=(self._sc(10), 0))
         self._var_auto_copy = tk.BooleanVar(value=self._current.get("auto_copy_otp", False))
         cb2 = tk.Checkbutton(
-            content, text="收到短信时自动复制验证码到剪贴板", font=(self._font, 10),
+            behavior_card, text="收到短信时自动复制验证码到剪贴板", font=(self._font, 10),
             variable=self._var_auto_copy, cursor="hand2",
-            bg=DARK["window_bg"], fg=DARK["text"],
-            activebackground=DARK["window_bg"], activeforeground=DARK["text"],
+            bg=DARK["card_bg"], fg=DARK["text"],
+            activebackground=DARK["card_bg"], activeforeground=DARK["text"],
             selectcolor=DARK["card_bg"],
         )
         cb2.pack(anchor="w", pady=(self._sc(6), 0))
@@ -547,14 +606,33 @@ class SettingsPage:
     def _sc(self, value: int) -> int:
         return max(1, int(round(value * self._scale)))
 
+    def _make_card(self, parent, title) -> tk.Frame:
+        """创建 Fluent 风格的卡片容器。"""
+        card = tk.Frame(
+            parent, bg=DARK["card_bg"],
+            highlightbackground=DARK["border"], highlightcolor=DARK["border"],
+            highlightthickness=1,
+        )
+        card._theme_role = "card"
+        card.pack(fill="x", pady=(0, self._sc(12)))
+        inner = tk.Frame(card, bg=DARK["card_bg"])
+        inner._theme_role = "card_inner"
+        inner.pack(fill="x", padx=self._sc(16), pady=self._sc(14))
+        tk.Label(
+            inner, text=title, font=(self._font, 11, "bold"),
+            bg=DARK["card_bg"], fg=DARK["text"], anchor="w",
+        ).pack(anchor="w", pady=(0, self._sc(8)))
+        return inner
+
     def _build_input(
         self, parent, label_text, key, *, is_password=False, placeholder=""
     ):
-        block = tk.Frame(parent, bg=DARK["window_bg"])
+        block = tk.Frame(parent, bg=DARK["card_bg"])
+        block._theme_role = "card_inner"
         block.pack(fill="x", pady=(0, self._sc(10)))
         tk.Label(
             block, text=label_text, font=(self._font, 10),
-            bg=DARK["window_bg"], fg=DARK["subtext"], anchor="w",
+            bg=DARK["card_bg"], fg=DARK["subtext"], anchor="w",
         ).pack(anchor="w")
 
         border = tk.Frame(block, bg=DARK["input_border"], padx=1, pady=1)
@@ -574,6 +652,9 @@ class SettingsPage:
         entry.pack(side="left", fill="x", expand=True, ipady=self._sc(6), padx=(self._sc(8), 0))
         entry.insert(0, self._current.get(key, ""))
         self._entries[key] = entry
+        self._borders[entry] = border
+        entry.bind("<FocusIn>", lambda _e, e=entry: self._set_focus(e, True))
+        entry.bind("<FocusOut>", lambda _e, e=entry: self._set_focus(e, False))
 
         if is_password:
             self._pwd_btn = tk.Button(
@@ -593,6 +674,13 @@ class SettingsPage:
             entry.configure(show="")
             self._pwd_btn.configure(text="隐藏")
             self._pwd_visible = True
+
+    def _set_focus(self, entry: tk.Entry, focused: bool):
+        border = self._borders.get(entry)
+        if border is None:
+            return
+        tokens = DARK if self._theme.current == "dark" else LIGHT
+        border.configure(bg=tokens["accent"] if focused else tokens["input_border"])
 
     def _collect(self) -> dict:
         cfg = {}
