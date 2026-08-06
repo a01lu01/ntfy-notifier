@@ -10,6 +10,7 @@ const PAGES = [
 let currentPage = "push";
 let config = null;
 let uiState = null;
+let pushTable = null;
 
 const COLUMNS = [
   { id: "time", title: "时间" },
@@ -87,6 +88,7 @@ function buildPushPage() {
     </div>
     <div class="empty" id="push-empty">暂无推送</div>
   `;
+  pushTable = el("push-table");
   el("btn-refresh").addEventListener("click", refreshPush);
   el("btn-clear").addEventListener("click", async () => {
     if (confirm("确定清空全部推送历史？此操作不可恢复。")) {
@@ -108,40 +110,86 @@ function buildPushPage() {
   makeTableSortable();
 }
 
-/* 列拖拽排序（简化版：拖动表头交换列） */
+/* 列拖放排序 + 右侧拖柄调整列宽 */
 function makeTableSortable() {
-  const table = el("push-table");
-  let dragCol = null;
-  table.querySelectorAll("th").forEach((th, index) => {
-    th.addEventListener("mousedown", () => { dragCol = index; });
-    th.addEventListener("mouseenter", () => {
-      if (dragCol !== null && dragCol !== index) {
-        const head = table.tHead.rows[0];
-        const cells = Array.from(head.cells);
-        if (dragCol < cells.length && index < cells.length) {
-          head.insertBefore(cells[dragCol], cells[index + (index > dragCol ? 1 : 0)]);
-          for (const row of table.tBodies[0].rows) {
-            const rowCells = Array.from(row.cells);
-            if (dragCol < rowCells.length && index < rowCells.length) {
-              row.insertBefore(
-                rowCells[dragCol],
-                rowCells[index + (index > dragCol ? 1 : 0)]
-              );
-            }
-          }
-          dragCol = index;
-        }
-      }
+  const table = pushTable;
+  if (!table) return;
+  let dragId = null;
+
+  table.querySelectorAll("th").forEach((th) => {
+    th.draggable = true;
+    th.addEventListener("dragstart", (e) => {
+      dragId = th.dataset.col;
+      e.dataTransfer.effectAllowed = "move";
+      th.classList.add("drag-over");
+    });
+    th.addEventListener("dragend", () => {
+      dragId = null;
+      table.querySelectorAll("th").forEach((t) => t.classList.remove("drag-over"));
+    });
+    th.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (dragId && dragId !== th.dataset.col) th.classList.add("drag-over");
+    });
+    th.addEventListener("dragleave", () => th.classList.remove("drag-over"));
+    th.addEventListener("drop", (e) => {
+      e.preventDefault();
+      th.classList.remove("drag-over");
+      if (!dragId || dragId === th.dataset.col) return;
+      moveColumn(dragId, th.dataset.col);
+      persistColumns();
+    });
+
+    // 右侧列宽拖柄（与列排序互不干扰）
+    const handle = document.createElement("span");
+    handle.className = "resize-handle";
+    th.appendChild(handle);
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const id = th.dataset.col;
+      const startX = e.clientX;
+      const startW = th.getBoundingClientRect().width;
+      const onMove = (ev) => {
+        const w = Math.max(80, Math.round(startW + ev.clientX - startX));
+        th.style.width = `${w}px`;
+        if (!uiState) uiState = { column_order: [], column_widths: {} };
+        uiState.column_widths[id] = w;
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        persistColumns();
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
     });
   });
-  document.addEventListener("mouseup", async () => {
-    if (dragCol !== null) {
-      dragCol = null;
-      const order = Array.from(table.tHead.rows[0].cells).map((th) => th.dataset.col);
-      const widths = uiState?.column_widths || {};
-      uiState = await invoke("save_ui_state", { order, widths });
-    }
-  });
+}
+
+function moveColumn(fromId, toId) {
+  const table = pushTable;
+  if (!table) return;
+  const head = table.tHead.rows[0];
+  const fromTh = head.querySelector(`th[data-col="${fromId}"]`);
+  const toTh = head.querySelector(`th[data-col="${toId}"]`);
+  if (!fromTh || !toTh) return;
+  const cells = Array.from(head.cells);
+  const fi = cells.indexOf(fromTh);
+  const ti = cells.indexOf(toTh);
+  head.insertBefore(fromTh, ti > fi ? toTh.nextSibling : toTh);
+  for (const row of table.tBodies[0].rows) {
+    const rowCells = Array.from(row.cells);
+    row.insertBefore(rowCells[fi], ti > fi ? rowCells[ti].nextSibling : rowCells[ti]);
+  }
+}
+
+async function persistColumns() {
+  const table = pushTable;
+  if (!table) return;
+  const order = Array.from(table.tHead.rows[0].cells).map((th) => th.dataset.col);
+  const widths = uiState?.column_widths || {};
+  uiState = await invoke("save_ui_state", { order, widths });
 }
 
 /* ---------- 设置页 ---------- */
@@ -230,6 +278,13 @@ function buildSettingsPage() {
       el("set-theme").querySelectorAll(".seg-btn").forEach((b) => {
         b.classList.toggle("active", b === btn);
       });
+      // 即时预览主题
+      const mode = btn.dataset.value;
+      const dark =
+        mode === "dark" ||
+        (mode === "system" &&
+          window.matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
     });
   });
 }
