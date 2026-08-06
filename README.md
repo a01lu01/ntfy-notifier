@@ -2,85 +2,107 @@
 
 Windows 系统托盘工具，订阅 ntfy 消息并弹出系统通知。
 
+当前版本基于 **Tauri 2 + Rust + 原生 HTML/CSS/JS**，数据继续保存在 `%APPDATA%\ntfy-notifier\` 下，与早期版本兼容。
+
 ## 功能
 
-- 托盘常驻，最小化不占窗口
+- 系统托盘常驻，关闭窗口隐藏到托盘
+- 单主窗口：推送 / 设置 / 关于
 - SSE 实时订阅，无轮询延迟
-- 系统原生 Toast 通知（plyer），可显示通知中心
-- 连接状态托盘图标实时切换（🟢已连接 / 🔴未连接）
-- 设置窗口：服务器、用户名、密码、主题、开机自启
-- 推送历史：SQLite 本地保存最近 1000 条，托盘历史窗口可查看/复制/清空
-- 收到验证码消息时可自动复制 4-8 位纯数字验证码到剪贴板
-- PyInstaller 单文件打包，无需 Python 环境
+- Windows Toast 系统通知
+- 推送历史：SQLite 本地保存最近 1000 条，表格支持拖动列排序、调整列宽并记忆
+- 收到验证码消息时自动复制 4-8 位纯数字验证码到剪贴板
+- 明/暗主题：跟随系统或手动切换
+- 开机自启、单实例运行
+- 密码使用 Windows DPAPI 加密后保存
 
-## 运行
+## 下载
 
-```bash
-# 安装依赖
-pip install -r requirements.txt
+发布版可在 GitHub Releases 页面获取：
 
-# 直接运行
-python -m src.ntfy_notifier
+<https://github.com/a01lu01/ntfy-notifier/releases>
+
+- `ntfy-notifier.exe`：便携版，直接运行
+- `ntfy-Notifier_1.0.0_x64-setup.exe`：NSIS 安装包
+
+## 开发环境
+
+- Windows 10/11（系统自带 WebView2）
+- Node.js 20+
+- Rust stable（含 Cargo）
+
+## 开发运行
+
+```powershell
+cd tauri
+npm install
+npm run tauri dev
 ```
-
-首次运行会自动弹出设置窗口，配置好 ntfy 服务器信息后保存即可。
 
 ## 打包
 
-```bash
-# 安装 PyInstaller
-pip install pyinstaller
-
-# 打包（输出 dist/ntfy-Notifier.exe）
-python -m PyInstaller ntfy-Notifier.spec
+```powershell
+cd tauri
+npm run tauri build
 ```
 
-或直接双击运行 `build.bat`。
+产物：
+
+- 便携版：`tauri/src-tauri/target/release/ntfy-notifier.exe`
+- 安装包：`tauri/src-tauri/target/release/bundle/nsis/ntfy-Notifier_1.0.0_x64-setup.exe`
 
 ## 配置
 
-ntfy 服务器需要开启 SSE 订阅支持。设置窗口填写：
+首次运行后在“设置”页填写：
 
 | 字段 | 说明 |
-|------|------|
-| 服务器地址 | ntfy 服务器地址，如 `http://your-server:8080` |
+| --- | --- |
+| 服务器地址 | ntfy 服务器地址，推荐使用 `https://` |
 | 用户名 | ntfy 用户名（可选） |
 | 密码 | ntfy 密码（可选） |
 | 主题 | 订阅的话题名，如 `sms` |
-| 开机自启 | 勾选后加入 Windows 开机自启动 |
+| 界面主题 | 跟随系统 / 浅色 / 深色 |
+| 开机自启 | 是否随 Windows 启动 |
+| 自动复制验证码 | 收到验证码时自动复制到剪贴板 |
 
-> 服务器地址默认留空，首次使用请在设置中填写。若服务器支持 HTTPS，建议使用
-> `https://` 地址，避免密码以明文在网络上传输；密码会使用 Windows DPAPI
-> 加密后保存在本地配置文件中。
+数据文件位于 `%APPDATA%\ntfy-notifier\`：
 
-## 推送历史
+| 文件 | 用途 |
+| --- | --- |
+| `config.json` | 配置，密码以 DPAPI 加密保存 |
+| `history.db` | SQLite 推送历史（最近 1000 条） |
+| `ui_state.json` | 表格列顺序与列宽记忆 |
 
-收到的推送会实时写入 `%APPDATA%/ntfy-notifier/history.db`（SQLite），
-自动保留最近 1000 条。点击托盘图标（或右键菜单中的"推送历史"）即可打开
-历史窗口，双击一条记录可复制消息内容。
+## 测试
+
+```powershell
+# 前端单元测试
+cd tauri
+npm test
+
+# 后端 Rust 测试
+cd tauri/src-tauri
+cargo test
+```
 
 ## 项目结构
 
-```
-ntfy-Notifier/
-├── src/
-│   ├── ntfy_notifier.py   # 主程序入口
-│   ├── notifier.py         # SSE 订阅 + 通知发送
-│   ├── tray.py             # pystray 托盘图标
-│   ├── ui.py               # Tkinter 设置窗口
-│   └── config.py           # 配置文件读写
-├── connected.ico           # 已连接状态图标
-├── disconnected.ico        # 未连接状态图标
-├── ntfy-Notifier.spec     # PyInstaller 打包配置
-├── build.bat               # 打包脚本
-└── requirements.txt        # 依赖列表
+```text
+ntfy-notifier/
+├── tauri/
+│   ├── src/                  # 前端：HTML/CSS/JS
+│   ├── public/assets/fonts/  # 打包使用的字体
+│   ├── tests/                # 前端单元测试
+│   ├── src-tauri/            # Rust 后端与打包配置
+│   │   ├── src/              # 配置、订阅、历史、通知等模块
+│   │   └── tauri.conf.json   # 窗口与打包配置
+│   └── package.json
+├── docs/
+│   └── ui-design.md          # 界面设计规格（字体/颜色/尺寸）
+└── README.md
 ```
 
-## 依赖
+## 历史说明
 
-- Python 3.10+
-- pystray
-- pillow
-- requests
-- plyer
-- pywin32（Windows）
+仓库根目录下的 `src/`、`tests/` 等为早期 Python 版代码，仅作历史保留，当前版本不再维护。旧文档已随 Tauri 版落地移除，当前设计规格见 `docs/ui-design.md`。
+
