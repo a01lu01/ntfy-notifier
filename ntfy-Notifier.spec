@@ -110,6 +110,8 @@ _hidden = [
     # winotify（Windows Toast 通知，首选，支持 AUMID）
     'winotify', 'winotify.audio', 'winotify._notify',
     'winotify._registry', 'winotify._communication',
+    # pywinstyles（Win11 窗口样式）
+    'pywinstyles',
     # re / 标准库
     're',
 ]

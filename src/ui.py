@@ -1,283 +1,610 @@
-"""
-设置窗口 UI - ntfy-Notifier
-基于 Tkinter 实现 Windows Fluent 风格设置窗口
-参考 Fluent Design：圆角、轻量阴影、Segoe UI Font、#0078D4 主色
+"""Fluent 风格主窗口 - ntfy-Notifier
+
+单主窗口 + 左侧导航（推送 / 设置 / 关于），支持深浅色主题。
 """
 
 import sys
 import tkinter as tk
+import webbrowser
 from tkinter import messagebox, ttk
 from typing import Callable, Optional
 
+from src.theme import DARK, LIGHT, ThemeManager
+from src.ui_state import (
+    DEFAULT_COLUMN_ORDER,
+    DEFAULT_COLUMN_WIDTHS,
+    MIN_COLUMN_WIDTHS,
+    ColumnStateStore,
+)
 
-# ── Fluent Design 色彩常量 ────────────────────────────────────────────────────
-_FLUENT_BG            = "#FFFFFF"
-_FLUENT_SURFACE       = "#F3F3F3"
-_FLUENT_BORDER        = "#E0E0E0"
-_FLUENT_TEXT          = "#1A1A1A"
-_FLUENT_SUBTEXT       = "#606060"
-_FLUENT_PLACEHOLDER   = "#999999"
-_FLUENT_ACCENT        = "#0078D4"
-_FLUENT_ACCENT_HOVER  = "#106EBE"
-_FLUENT_DANGER        = "#C42B1C"
-_FLUENT_INPUT_BG      = "#FFFFFF"
-_FLUENT_INPUT_BORDER  = "#CCCCCC"
-_FLUENT_INPUT_FOCUS   = "#0078D4"
+APP_VERSION = "1.0.0"
+GITHUB_URL = "https://github.com/a01lu01/ntfy-notifier"
 
-# 窗口尺寸
-_WIN_W = 460
-_WIN_H = 440
+COLUMN_TITLES = {"time": "时间", "title": "标题", "message": "内容"}
 
 
-class SettingsWindow:
-    """
-    Fluent 风格设置窗口。
-    show_and_wait() 在当前线程阻塞，直到窗口关闭，
-    内部通过 root.after() 驱动 Tk 事件循环。
-    """
+def _font_family(root: tk.Misc) -> str:
+    """优先 Segoe UI Variable，回退 Segoe UI。"""
+    try:
+        import tkinter.font as tkfont
+        families = set(tkfont.families(root))
+        if "Segoe UI Variable" in families:
+            return "Segoe UI Variable"
+    except Exception:
+        pass
+    return "Segoe UI"
+
+
+def _walk_apply(widget: tk.Widget, tokens: dict):
+    """递归给经典 tk 控件应用主题色（通过 _theme_role 识别语义角色）。"""
+    for child in widget.winfo_children():
+        role = getattr(child, "_theme_role", None)
+        cls = child.winfo_class()
+        if cls == "Frame":
+            bg_map = {
+                "card": "card_bg",
+                "toolbar": "window_bg",
+                "input_border": "input_border",
+                "input_inner": "input_bg",
+            }
+            child.configure(bg=tokens.get(bg_map.get(role, "window_bg")))
+        elif cls == "Label":
+            fg = tokens["text"]
+            if role in ("subtitle", "subtext"):
+                fg = tokens["subtext"]
+            elif role in ("accent", "link"):
+                fg = tokens["accent_text"]
+            child.configure(bg=tokens["window_bg"], fg=fg)
+        elif cls == "Button":
+            if role == "accent":
+                child.configure(
+                    bg=tokens["accent"], fg="#FFFFFF",
+                    activebackground=tokens["accent"], activeforeground="#FFFFFF",
+                )
+            elif role == "danger":
+                child.configure(
+                    bg=tokens["accent"], fg="#FFFFFF",
+                    activebackground=tokens["accent"], activeforeground="#FFFFFF",
+                )
+            else:
+                child.configure(
+                    bg=tokens["card_bg"], fg=tokens["text"],
+                    activebackground=tokens["hover"], activeforeground=tokens["text"],
+                )
+        elif cls == "Entry":
+            child.configure(
+                bg=tokens["input_bg"], fg=tokens["text"],
+                insertbackground=tokens["text"],
+            )
+        elif cls in ("Checkbutton", "Radiobutton"):
+            child.configure(
+                bg=tokens["window_bg"], fg=tokens["text"],
+                activebackground=tokens["window_bg"],
+                activeforeground=tokens["text"],
+                selectcolor=tokens["card_bg"],
+            )
+        _walk_apply(child, tokens)
+
+
+def _apply_window_style(win: tk.Toplevel, tokens: dict):
+    """应用 pywinstyles 的 Win11 圆角与标题栏明暗；失败则忽略。"""
+    try:
+        import pywinstyles
+        pywinstyles.apply_style(win, "win11")
+        pywinstyles.apply_style(win, "dark" if tokens is DARK else "light")
+        pywinstyles.change_header_color(win, tokens["window_bg"])
+    except Exception:
+        pass
+
+
+class MainWindow:
+    """主窗口：左侧导航 + 推送/设置/关于三个页面。"""
 
     def __init__(
         self,
-        current_config: dict,
+        master: tk.Tk,
+        config: dict,
         on_save: Callable[[dict], None],
-        on_cancel: Optional[Callable] = None,
-        master: Optional[tk.Tk] = None,
+        theme_manager: ThemeManager,
+        scale: float = 1.0,
     ):
-        self._current = dict(current_config)
-        self._on_save = on_save
-        self._on_cancel = on_cancel or (lambda: None)
         self._master = master
+        self._config = dict(config)
+        self._on_save = on_save
+        self._theme = theme_manager
+        self._scale = scale
         self._win: Optional[tk.Toplevel] = None
-        self._entries: dict[str, tk.Entry] = {}
-        self._var_auto_start = tk.BooleanVar(value=False)
-        self._closed = False
-        self._pwd_visible = False
+        self._sidebar: Optional[tk.Frame] = None
+        self._nav_items = {}
+        self._pages = {}
+        self._current_page = "push"
+        self._font = _font_family(master)
+        self._store = ColumnStateStore()
+        self._build()
 
-    # ── 公开接口 ─────────────────────────────────────────────────────────────
+    def _sc(self, value: int) -> int:
+        return max(1, int(round(value * self._scale)))
+
+    def _build(self):
+        win = tk.Toplevel(self._master)
+        self._win = win
+        win.title("ntfy-Notifier")
+        win.configure(bg=DARK["window_bg"])
+        win.geometry(f"{self._sc(1350)}x{self._sc(800)}")
+        win.minsize(self._sc(900), self._sc(500))
+        win.protocol("WM_DELETE_WINDOW", self.hide)
+
+        self._sidebar = tk.Frame(win, width=self._sc(180), bg=DARK["window_bg"])
+        self._sidebar.pack(side="left", fill="y")
+        self._sidebar.pack_propagate(False)
+
+        content = tk.Frame(win, bg=DARK["window_bg"])
+        content.pack(side="left", fill="both", expand=True)
+
+        self._build_nav()
+        self._pages["push"] = PushPage(content, self._scale, self._font, self._store)
+        self._pages["settings"] = SettingsPage(
+            content, self._config, self._handle_save, self._theme, self._scale, self._font
+        )
+        self._pages["about"] = AboutPage(content, self._scale, self._font)
+        for page in self._pages.values():
+            page.frame.pack(fill="both", expand=True)
+            page.frame.pack_forget()
+
+        self.show_page("push")
+        self.apply_theme()
+        win.withdraw()
+
+    def _handle_save(self, cfg: dict):
+        """保存配置后同步设置页的“当前值”，并立即应用主题。"""
+        self._config = dict(cfg)
+        self._pages["settings"].update_config(cfg)
+        self._theme.set_mode(cfg.get("theme_mode", "system"))
+        self.apply_theme()
+        if self._on_save:
+            self._on_save(cfg)
+
+    def _build_nav(self):
+        for name, text in (("push", "推送"), ("settings", "设置"), ("about", "关于")):
+            item = tk.Frame(self._sidebar, bg=DARK["window_bg"])
+            item.pack(fill="x", padx=self._sc(8), pady=self._sc(2))
+            item._theme_role = "nav_item"
+            indicator = tk.Frame(item, width=self._sc(3), bg=DARK["window_bg"])
+            indicator.pack(side="left", fill="y")
+            label = tk.Label(
+                item,
+                text=text,
+                font=(self._font, 11),
+                bg=DARK["window_bg"],
+                fg=DARK["text"],
+                anchor="w",
+                cursor="hand2",
+                padx=self._sc(10),
+                pady=self._sc(7),
+            )
+            label._theme_role = "nav"
+            label.pack(side="left", fill="x", expand=True)
+            label.bind("<Button-1>", lambda _e, n=name: self.show_page(n))
+            label.bind("<Enter>", lambda _e, l=label: self._nav_hover(l, True))
+            label.bind("<Leave>", lambda _e, l=label: self._nav_hover(l, False))
+            self._nav_items[name] = (item, indicator, label)
+
+    def _nav_hover(self, label: tk.Label, entering: bool):
+        tokens = DARK if self._theme.current == "dark" else LIGHT
+        name = next(n for n, (_, _, l) in self._nav_items.items() if l is label)
+        if name == self._current_page:
+            return
+        label.configure(bg=tokens["hover"] if entering else tokens["window_bg"])
+
+    def _select_nav(self, name: str):
+        tokens = DARK if self._theme.current == "dark" else LIGHT
+        self._current_page = name
+        for n, (item, indicator, label) in self._nav_items.items():
+            if n == name:
+                item.configure(bg=tokens["selected"])
+                indicator.configure(bg=tokens["accent"])
+                label.configure(
+                    bg=tokens["selected"], fg=tokens["accent_text"], font=(self._font, 11, "bold")
+                )
+            else:
+                item.configure(bg=tokens["window_bg"])
+                indicator.configure(bg=tokens["window_bg"])
+                label.configure(
+                    bg=tokens["window_bg"], fg=tokens["text"], font=(self._font, 11)
+                )
+
+    def show_page(self, name: str):
+        if name not in self._pages:
+            return
+        for n, page in self._pages.items():
+            if n == name:
+                page.frame.pack(fill="both", expand=True)
+            else:
+                page.frame.pack_forget()
+        self._select_nav(name)
+        if name == "push":
+            self._pages["push"].refresh()
 
     def show(self):
-        """非阻塞：在 _master 上显示设置窗口。"""
-        root = self._master or tk.Tk()
-        if not self._master:
-            root.withdraw()
-
-        win = tk.Toplevel(root)
-        self._win = win
-        win.title("ntfy-Notifier 设置")
-        win.geometry(f"{_WIN_W}x{_WIN_H}")
-        win.resizable(False, False)
-        win.configure(bg=_FLUENT_BG)
-
-        # ★ 关键：先 pack 底部 footer，再 pack 上方内容，确保按钮永远可见
-        self._build_footer(win)
-        self._build_content(win)
-
-        win.protocol("WM_DELETE_WINDOW", self._cancel)
-
-        # 居中
-        win.update_idletasks()
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        win.geometry(f"{_WIN_W}x{_WIN_H}+{(sw - _WIN_W) // 2}+{(sh - _WIN_H) // 2}")
-        win.deiconify()
-        win.after(0, lambda: (win.lift(), win.focus_force()))
-
-        if not self._master:
-            while not self._closed and win.winfo_exists():
-                win.update()
-                win.update_idletasks()
-
-    def show_and_wait(self):
-        """兼容性别名，内部调用 show()。"""
-        self.show()
-
-    # ── UI 构建 ─────────────────────────────────────────────────────────────
-
-    def _build_content(self, parent: tk.Widget):
-        """构建标题 + 表单 + 开机自启区域。"""
-        content = tk.Frame(parent, bg=_FLUENT_BG)
-        content.pack(fill="both", expand=True, padx=32, pady=(20, 0))
-
-        # ── 标题 ──
-        tk.Label(
-            content, text="设置", font=("Segoe UI", 16, "bold"),
-            fg=_FLUENT_TEXT, bg=_FLUENT_BG, anchor="w",
-        ).pack(anchor="w")
-
-        tk.Label(
-            content, text="配置 ntfy-Notifier 连接参数", font=("Segoe UI", 9),
-            fg=_FLUENT_SUBTEXT, bg=_FLUENT_BG, anchor="w",
-        ).pack(anchor="w", pady=(2, 16))
-
-        # ── 表单字段（上下排列：标签在上，输入框在下）──
-        self._build_input_block(content, "服务器地址", "server", placeholder="http://...")
-
-        # 密码字段行：用户名 + 密码并排
-        pair = tk.Frame(content, bg=_FLUENT_BG)
-        pair.pack(fill="x", pady=(0, 0))
-        pair.columnconfigure(0, weight=1)
-        pair.columnconfigure(1, weight=1)
-
-        left = tk.Frame(pair, bg=_FLUENT_BG)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        self._build_input_block(left, "用户名", "username")
-
-        right = tk.Frame(pair, bg=_FLUENT_BG)
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        self._build_input_block(right, "密码", "password", is_password=True)
-
-        self._build_input_block(content, "主题", "topic", placeholder="sms")
-
-        # ── 开机自启 ──
-        self._var_auto_start.set(self._current.get("auto_start", False))
-        cb = tk.Checkbutton(
-            content,
-            text="  开机自启动",
-            font=("Segoe UI", 9),
-            variable=self._var_auto_start,
-            bg=_FLUENT_BG, fg=_FLUENT_TEXT,
-            activebackground=_FLUENT_BG, activeforeground=_FLUENT_TEXT,
-            selectcolor=_FLUENT_BG,
-            cursor="hand2",
+        if self._win is None:
+            return
+        self._win.update_idletasks()
+        sw, sh = self._win.winfo_screenwidth(), self._win.winfo_screenheight()
+        w, h = self._sc(1350), self._sc(800)
+        self._win.geometry(
+            f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}"
         )
-        cb.pack(anchor="w", pady=(8, 0))
+        self._win.deiconify()
+        self._win.lift()
+        self._win.focus_force()
 
-        # ── 自动复制验证码 ──
-        self._var_auto_copy_otp = tk.BooleanVar(value=self._current.get("auto_copy_otp", False))
-        cb_otp = tk.Checkbutton(
-            content,
-            text="  收到短信时自动复制验证码到剪切板",
-            font=("Segoe UI", 9),
-            variable=self._var_auto_copy_otp,
-            bg=_FLUENT_BG, fg=_FLUENT_TEXT,
-            activebackground=_FLUENT_BG, activeforeground=_FLUENT_TEXT,
-            selectcolor=_FLUENT_BG,
-            cursor="hand2",
+    def hide(self):
+        if self._win is not None:
+            self._win.withdraw()
+
+    def apply_theme(self):
+        tokens = DARK if self._theme.current == "dark" else LIGHT
+        if self._win is None:
+            return
+        self._win.configure(bg=tokens["window_bg"])
+        self._sidebar.configure(bg=tokens["window_bg"])
+        _walk_apply(self._sidebar, tokens)
+        for page in self._pages.values():
+            page.apply_theme(tokens)
+        self._select_nav(self._current_page)
+        _apply_window_style(self._win, tokens)
+
+    def destroy(self):
+        if self._win is not None:
+            self._win.destroy()
+            self._win = None
+
+
+class PushPage:
+    """推送历史页面。"""
+
+    def __init__(self, parent, scale, font, store: ColumnStateStore):
+        self._scale = scale
+        self._font = font
+        self._store = store
+        self._state = store.load()
+        self._order = list(self._state["column_order"])
+        self._drag_col = None
+
+        self.frame = tk.Frame(parent, bg=DARK["window_bg"])
+        self.frame._theme_role = "window"
+
+        toolbar = tk.Frame(self.frame, bg=DARK["window_bg"])
+        toolbar._theme_role = "toolbar"
+        toolbar.pack(fill="x", padx=self._sc(16), pady=self._sc(12))
+        self._btn_refresh = self._make_button(toolbar, "刷新", self.refresh)
+        self._btn_refresh.pack(side="left")
+        self._btn_clear = self._make_button(toolbar, "清空", self._clear)
+        self._btn_clear.pack(side="left", padx=(self._sc(8), 0))
+
+        table_frame = tk.Frame(self.frame, bg=DARK["window_bg"])
+        table_frame.pack(fill="both", expand=True, padx=self._sc(16), pady=(0, self._sc(16)))
+
+        style = ttk.Style(parent)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        self._tree = ttk.Treeview(
+            table_frame, columns=self._order, show="headings", selectmode="browse",
+            style="Push.Treeview",
         )
-        cb_otp.pack(anchor="w", pady=(8, 0))
+        vscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self._tree.yview)
+        hscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self._tree.xview)
+        self._tree.configure(yscrollcommand=vscroll.set, xscrollcommand=hscroll.set)
+        self._tree.grid(row=0, column=0, sticky="nsew")
+        vscroll.grid(row=0, column=1, sticky="ns")
+        hscroll.grid(row=1, column=0, sticky="ew")
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
 
-    def _build_input_block(
-        self, parent: tk.Widget, label: str, key: str,
-        *, is_password: bool = False, placeholder: str = "",
+        self._empty = tk.Label(
+            self.frame, text="暂无推送", font=(self._font, 12),
+            bg=DARK["window_bg"], fg=DARK["subtext"],
+        )
+        self._empty._theme_role = "subtext"
+
+        self._tree.bind("<Double-1>", self._copy_message)
+        self._tree.bind("<ButtonPress-1>", self._on_heading_press)
+        self._tree.bind("<B1-Motion>", self._on_heading_motion)
+        self._tree.bind("<ButtonRelease-1>", self._on_heading_release)
+        self._set_columns()
+        self.refresh()
+
+    def _sc(self, value: int) -> int:
+        return max(1, int(round(value * self._scale)))
+
+    def _make_button(self, parent, text, command) -> tk.Button:
+        btn = tk.Button(
+            parent, text=text, font=(self._font, 10),
+            bd=0, relief="flat", cursor="hand2", command=command,
+        )
+        btn._theme_role = "secondary"
+        return btn
+
+    def _set_columns(self):
+        self._tree["columns"] = self._order
+        for col in self._order:
+            self._tree.heading(col, text=COLUMN_TITLES[col])
+            self._tree.column(
+                col,
+                width=self._sc(self._state["column_widths"].get(
+                    col, DEFAULT_COLUMN_WIDTHS[col]
+                )),
+                minwidth=self._sc(MIN_COLUMN_WIDTHS[col]),
+                stretch=(col == "message"),
+                anchor="w",
+            )
+
+    def _on_heading_press(self, event):
+        col = self._tree.identify_column(event.x)
+        if col and col != "#0":
+            self._drag_col = col
+
+    def _on_heading_motion(self, event):
+        if self._drag_col is None:
+            return
+        cur = self._tree.identify_column(event.x)
+        if not cur or cur == "#0" or cur == self._drag_col:
+            return
+        a = self._order.index(self._drag_col)
+        b = self._order.index(cur)
+        self._order[a], self._order[b] = self._order[b], self._order[a]
+        self._set_columns()
+        self._drag_col = cur
+
+    def _on_heading_release(self, event):
+        if self._drag_col is None:
+            # 也可能是列宽调整：保存宽度即可
+            self._save_column_state()
+            return
+        self._drag_col = None
+        self._save_column_state()
+
+    def _save_column_state(self):
+        widths = {}
+        for col in self._order:
+            logical = int(self._tree.column(col, "width") / self._scale)
+            widths[col] = max(MIN_COLUMN_WIDTHS[col], logical)
+        self._state = {"column_order": list(self._order), "column_widths": widths}
+        self._store.save(self._order, widths)
+
+    def refresh(self):
+        from src.history import get_messages
+        items = get_messages(limit=1000)
+        for item in self._tree.get_children():
+            self._tree.delete(item)
+        for row in items:
+            self._tree.insert(
+                "", "end", values=(row["time"], row["title"], row["message"])
+            )
+        if items:
+            self._empty.pack_forget()
+        else:
+            self._empty.pack(fill="x", pady=self._sc(24))
+
+    def _clear(self):
+        if not messagebox.askyesno(
+            "清空历史", "确定清空全部推送历史？此操作不可恢复。",
+            parent=self.frame.winfo_toplevel(),
+        ):
+            return
+        from src.history import clear_history
+        if clear_history():
+            self.refresh()
+
+    def _copy_message(self, event):
+        selection = self._tree.selection()
+        if not selection:
+            return
+        values = self._tree.item(selection[0], "values")
+        if len(values) >= 3:
+            win = self.frame.winfo_toplevel()
+            win.clipboard_clear()
+            win.clipboard_append(values[2])
+
+    def apply_theme(self, tokens):
+        self.frame.configure(bg=tokens["window_bg"])
+        _walk_apply(self.frame, tokens)
+        self._empty.configure(bg=tokens["window_bg"], fg=tokens["subtext"])
+        style = ttk.Style(self.frame)
+        style.configure(
+            "Push.Treeview",
+            background=tokens["card_bg"],
+            fieldbackground=tokens["card_bg"],
+            foreground=tokens["text"],
+            borderwidth=0,
+            rowheight=self._sc(30),
+            font=(self._font, 10),
+        )
+        style.map(
+            "Push.Treeview",
+            background=[("selected", tokens["selected"])],
+            foreground=[("selected", tokens["text"])],
+        )
+        style.configure(
+            "Push.Treeview.Heading",
+            background=tokens["hover"],
+            foreground=tokens["text"],
+            relief="flat",
+            font=(self._font, 10, "bold"),
+            padding=(self._sc(6), self._sc(4)),
+        )
+        style.map(
+            "Push.Treeview.Heading",
+            background=[("active", tokens["selected"])],
+        )
+
+
+class SettingsPage:
+    """设置页面。"""
+
+    def __init__(
+        self,
+        parent,
+        config: dict,
+        on_save: Callable[[dict], None],
+        theme_manager: ThemeManager,
+        scale: float,
+        font: str,
     ):
-        """构建标签 + 输入框的纵向块（密码框带独立的眼睛按钮）。"""
-        block = tk.Frame(parent, bg=_FLUENT_BG)
-        block.pack(fill="x", pady=(0, 10))
+        self._scale = scale
+        self._font = font
+        self._on_save = on_save
+        self._theme = theme_manager
+        self._current = dict(config)
+        self._entries = {}
+        self._pwd_visible = False
 
-        # 标签
+        self.frame = tk.Frame(parent, bg=DARK["window_bg"])
+        self.frame._theme_role = "window"
+
+        content = tk.Frame(self.frame, bg=DARK["window_bg"])
+        content.pack(fill="both", expand=True, padx=self._sc(40), pady=self._sc(24))
+
         tk.Label(
-            block, text=label, font=("Segoe UI", 9),
-            fg=_FLUENT_SUBTEXT, bg=_FLUENT_BG, anchor="w",
+            content, text="设置", font=(self._font, 15, "bold"),
+            bg=DARK["window_bg"], fg=DARK["text"], anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            content, text="配置 ntfy-Notifier 连接参数", font=(self._font, 10),
+            bg=DARK["window_bg"], fg=DARK["subtext"], anchor="w",
+        ).pack(anchor="w", pady=(self._sc(2), self._sc(16)))
+
+        self._build_input(content, "服务器地址", "server", placeholder="https://...")
+
+        pair = tk.Frame(content, bg=DARK["window_bg"])
+        pair.pack(fill="x")
+        left = tk.Frame(pair, bg=DARK["window_bg"])
+        left.pack(side="left", fill="x", expand=True, padx=(0, self._sc(6)))
+        right = tk.Frame(pair, bg=DARK["window_bg"])
+        right.pack(side="left", fill="x", expand=True, padx=(self._sc(6), 0))
+        self._build_input(left, "用户名", "username")
+        self._build_input(right, "密码", "password", is_password=True)
+
+        self._build_input(content, "主题", "topic", placeholder="sms")
+
+        # 界面主题
+        theme_label = tk.Label(
+            content, text="界面主题", font=(self._font, 10),
+            bg=DARK["window_bg"], fg=DARK["subtext"], anchor="w",
+        )
+        theme_label._theme_role = "subtext"
+        theme_label.pack(anchor="w", pady=(self._sc(12), self._sc(4)))
+        self._var_theme = tk.StringVar(value=self._current.get("theme_mode", "system"))
+        theme_row = tk.Frame(content, bg=DARK["window_bg"])
+        theme_row.pack(anchor="w")
+        for value, text in (("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
+            tk.Radiobutton(
+                theme_row, text=text, value=value, variable=self._var_theme,
+                font=(self._font, 10), cursor="hand2",
+                bg=DARK["window_bg"], fg=DARK["text"],
+                activebackground=DARK["window_bg"], activeforeground=DARK["text"],
+                selectcolor=DARK["card_bg"],
+            ).pack(side="left", padx=(0, self._sc(16)))
+
+        # 行为选项
+        self._var_auto_start = tk.BooleanVar(value=self._current.get("auto_start", False))
+        cb = tk.Checkbutton(
+            content, text="开机自启动", font=(self._font, 10),
+            variable=self._var_auto_start, cursor="hand2",
+            bg=DARK["window_bg"], fg=DARK["text"],
+            activebackground=DARK["window_bg"], activeforeground=DARK["text"],
+            selectcolor=DARK["card_bg"],
+        )
+        cb.pack(anchor="w", pady=(self._sc(12), 0))
+        self._var_auto_copy = tk.BooleanVar(value=self._current.get("auto_copy_otp", False))
+        cb2 = tk.Checkbutton(
+            content, text="收到短信时自动复制验证码到剪贴板", font=(self._font, 10),
+            variable=self._var_auto_copy, cursor="hand2",
+            bg=DARK["window_bg"], fg=DARK["text"],
+            activebackground=DARK["window_bg"], activeforeground=DARK["text"],
+            selectcolor=DARK["card_bg"],
+        )
+        cb2.pack(anchor="w", pady=(self._sc(6), 0))
+
+        # 底部按钮
+        footer = tk.Frame(self.frame, bg=DARK["window_bg"])
+        footer.pack(side="bottom", fill="x", padx=self._sc(40), pady=self._sc(16))
+        save_btn = tk.Button(
+            footer, text="保存", font=(self._font, 10, "bold"),
+            bd=0, relief="flat", cursor="hand2", command=self._save,
+        )
+        save_btn._theme_role = "accent"
+        save_btn.pack(side="right", ipadx=self._sc(12), ipady=self._sc(5))
+        cancel_btn = tk.Button(
+            footer, text="取消", font=(self._font, 10),
+            bd=0, relief="flat", cursor="hand2", command=self._reload,
+        )
+        cancel_btn._theme_role = "secondary"
+        cancel_btn.pack(side="right", padx=(0, self._sc(10)), ipadx=self._sc(12), ipady=self._sc(5))
+
+    def _sc(self, value: int) -> int:
+        return max(1, int(round(value * self._scale)))
+
+    def _build_input(
+        self, parent, label_text, key, *, is_password=False, placeholder=""
+    ):
+        block = tk.Frame(parent, bg=DARK["window_bg"])
+        block.pack(fill="x", pady=(0, self._sc(10)))
+        tk.Label(
+            block, text=label_text, font=(self._font, 10),
+            bg=DARK["window_bg"], fg=DARK["subtext"], anchor="w",
         ).pack(anchor="w")
 
-        # 输入行
-        input_row = tk.Frame(block, bg=_FLUENT_INPUT_BORDER, bd=0)
-        input_row.pack(fill="x", pady=(4, 0))
-
-        # 带边框效果的外框
-        border_canvas = tk.Frame(
-            input_row, bg=_FLUENT_INPUT_BORDER, padx=1, pady=1,
-        )
-        border_canvas.pack(fill="x")
-
-        inner = tk.Frame(border_canvas, bg=_FLUENT_INPUT_BG)
+        border = tk.Frame(block, bg=DARK["input_border"], padx=1, pady=1)
+        border._theme_role = "input_border"
+        border.pack(fill="x", pady=(self._sc(4), 0))
+        inner = tk.Frame(border, bg=DARK["input_bg"])
+        inner._theme_role = "input_inner"
         inner.pack(fill="x")
 
-        # Entry
-        entry_kw = dict(
-            font=("Segoe UI", 10),
-            bg=_FLUENT_INPUT_BG, fg=_FLUENT_TEXT,
-            insertbackground=_FLUENT_TEXT,
-            bd=0, relief="flat",
-            highlightthickness=0,
+        entry = tk.Entry(
+            inner, font=(self._font, 11), bd=0, relief="flat",
+            highlightthickness=0, bg=DARK["input_bg"], fg=DARK["text"],
+            insertbackground=DARK["text"],
         )
         if is_password:
-            entry_kw["show"] = "•"
-
-        entry = tk.Entry(inner, **entry_kw)
-        entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(8, 0))
+            entry.configure(show="•")
+        entry.pack(side="left", fill="x", expand=True, ipady=self._sc(6), padx=(self._sc(8), 0))
         entry.insert(0, self._current.get(key, ""))
         self._entries[key] = entry
 
-        # 密码切换按钮：独立在 Entry 右侧，不挤占输入框
         if is_password:
-            eye_btn = tk.Label(
-                inner, text="👁", font=("Segoe UI Emoji", 10),
-                bg=_FLUENT_INPUT_BG, fg=_FLUENT_SUBTEXT,
-                cursor="hand2",
+            self._pwd_btn = tk.Button(
+                inner, text="显示", font=(self._font, 9), bd=0, relief="flat",
+                cursor="hand2", command=self._toggle_password,
             )
-            eye_btn.pack(side="right", padx=(4, 6), pady=4)
-            # 绑定点击
-            eye_btn.bind("<Button-1>", lambda _e: self._toggle_password(entry, eye_btn))
-            # hover 效果
-            eye_btn.bind("<Enter>", lambda _e: eye_btn.config(fg=_FLUENT_ACCENT))
-            eye_btn.bind("<Leave>", lambda _e: eye_btn.config(fg=_FLUENT_SUBTEXT))
+            self._pwd_btn._theme_role = "secondary"
+            self._pwd_btn.pack(side="right", padx=(self._sc(4), self._sc(8)))
 
-        # 焦点高亮
-        def _on_focus_in(_e, e=entry, bc=border_canvas):
-            bc.config(bg=_FLUENT_INPUT_FOCUS)
-
-        def _on_focus_out(_e, e=entry, bc=border_canvas):
-            bc.config(bg=_FLUENT_INPUT_BORDER)
-
-        entry.bind("<FocusIn>", _on_focus_in)
-        entry.bind("<FocusOut>", _on_focus_out)
-
-    def _toggle_password(self, entry: tk.Entry, eye_btn: tk.Label):
-        """切换密码可见性。"""
+    def _toggle_password(self):
+        entry = self._entries["password"]
         if self._pwd_visible:
-            entry.config(show="•")
-            eye_btn.config(text="👁")
+            entry.configure(show="•")
+            self._pwd_btn.configure(text="显示")
             self._pwd_visible = False
         else:
-            entry.config(show="")
-            eye_btn.config(text="👁‍🗨")
+            entry.configure(show="")
+            self._pwd_btn.configure(text="隐藏")
             self._pwd_visible = True
 
-    def _build_footer(self, parent: tk.Widget):
-        """构建底部按钮栏（pack(side=BOTTOM) 确保永远可见）。"""
-        footer = tk.Frame(parent, bg=_FLUENT_BG)
-        footer.pack(side="bottom", fill="x")
-
-        # 分隔线
-        tk.Frame(footer, height=1, bg=_FLUENT_BORDER).pack(fill="x")
-
-        btn_row = tk.Frame(footer, bg=_FLUENT_BG)
-        btn_row.pack(fill="x", padx=32, pady=(12, 20))
-
-        # 保存按钮
-        save_btn = tk.Button(
-            btn_row, text="  保存  ", font=("Segoe UI", 9, "bold"),
-            fg="#FFFFFF", bg=_FLUENT_ACCENT,
-            activeforeground="#FFFFFF", activebackground=_FLUENT_ACCENT_HOVER,
-            bd=0, cursor="hand2", relief="flat",
-            command=self._save,
-        )
-        save_btn.pack(side="right", ipady=4)
-
-        # 取消按钮
-        cancel_btn = tk.Button(
-            btn_row, text="  取消  ", font=("Segoe UI", 9),
-            fg=_FLUENT_TEXT, bg=_FLUENT_SURFACE,
-            activeforeground=_FLUENT_TEXT, activebackground=_FLUENT_BORDER,
-            bd=0, cursor="hand2", relief="flat",
-            command=self._cancel,
-        )
-        cancel_btn.pack(side="right", padx=(0, 10), ipady=4)
-
-    # ── 交互逻辑 ────────────────────────────────────────────────────────────
-
-    def _collect_config(self) -> dict:
-        """从表单收集当前配置值。"""
+    def _collect(self) -> dict:
         cfg = {}
         for key, entry in self._entries.items():
             cfg[key] = entry.get()
+        cfg["theme_mode"] = self._var_theme.get()
         cfg["auto_start"] = bool(self._var_auto_start.get())
-        cfg["auto_copy_otp"] = bool(self._var_auto_copy_otp.get())
+        cfg["auto_copy_otp"] = bool(self._var_auto_copy.get())
         return cfg
 
     def _save(self):
-        """保存配置并关闭窗口。"""
-        cfg = self._collect_config()
+        cfg = self._collect()
         server = str(cfg.get("server", ""))
         password = str(cfg.get("password", ""))
         if server.startswith("http://") and password:
@@ -285,168 +612,68 @@ class SettingsWindow:
                 "安全提示",
                 "当前服务器地址使用 http://，密码将以明文在网络上传输，"
                 "建议改用 https://。仍要保存吗？",
-                parent=self._win,
+                parent=self.frame.winfo_toplevel(),
             ):
                 return
         try:
             self._on_save(cfg)
         except Exception as e:
             print(f"[ntfy] 保存失败: {e}", file=sys.stderr)
-        finally:
-            self._close()
 
-    def _cancel(self):
-        """取消并关闭窗口。"""
-        if self._on_cancel:
-            try:
-                self._on_cancel()
-            except Exception:
-                pass
-        self._close()
+    def _reload(self):
+        """取消：把表单恢复为最近一次已保存的配置。"""
+        for key, entry in self._entries.items():
+            entry.delete(0, "end")
+            entry.insert(0, self._current.get(key, ""))
+        self._var_theme.set(self._current.get("theme_mode", "system"))
+        self._var_auto_start.set(self._current.get("auto_start", False))
+        self._var_auto_copy.set(self._current.get("auto_copy_otp", False))
+        if self._pwd_visible:
+            self._toggle_password()
 
-    def _close(self):
-        """关闭设置窗口。"""
-        self._closed = True
-        if self._win and self._win.winfo_exists():
-            self._win.destroy()
+    def update_config(self, config: dict):
+        self._current = dict(config)
+
+    def apply_theme(self, tokens):
+        self.frame.configure(bg=tokens["window_bg"])
+        _walk_apply(self.frame, tokens)
 
 
-class HistoryWindow:
-    """推送历史窗口：显示最近 1000 条推送，支持刷新/清空/进入设置。"""
+class AboutPage:
+    """关于页面。"""
 
-    _WIN_W = 760
-    _WIN_H = 500
+    def __init__(self, parent, scale, font):
+        self._scale = scale
+        self._font = font
+        self.frame = tk.Frame(parent, bg=DARK["window_bg"])
+        self.frame._theme_role = "window"
 
-    def __init__(
-        self,
-        master: Optional[tk.Tk] = None,
-        on_settings: Optional[Callable] = None,
-    ):
-        self._master = master
-        self._on_settings = on_settings
-        self._win: Optional[tk.Toplevel] = None
-        self._tree: Optional[ttk.Treeview] = None
+        box = tk.Frame(self.frame, bg=DARK["window_bg"])
+        box.pack(expand=True, padx=self._sc(60), pady=self._sc(40))
+        tk.Label(
+            box, text="ntfy-Notifier", font=(self._font, 15, "bold"),
+            bg=DARK["window_bg"], fg=DARK["text"],
+        ).pack(anchor="w")
+        tk.Label(
+            box, text=f"版本 {APP_VERSION}", font=(self._font, 10),
+            bg=DARK["window_bg"], fg=DARK["subtext"],
+        ).pack(anchor="w", pady=(self._sc(4), self._sc(12)))
+        tk.Label(
+            box, text="Windows 系统托盘工具，订阅 ntfy 消息并弹出系统通知。",
+            font=(self._font, 10), bg=DARK["window_bg"], fg=DARK["text"], anchor="w",
+        ).pack(anchor="w", pady=(0, self._sc(12)))
 
-    def show(self):
-        """在主 Tk 线程中显示历史窗口（非阻塞）。"""
-        root = self._master or tk.Tk()
-        win = tk.Toplevel(root)
-        self._win = win
-        win.title("ntfy-Notifier 推送历史")
-        win.geometry(f"{self._WIN_W}x{self._WIN_H}")
-        win.minsize(560, 360)
-        win.configure(bg=_FLUENT_BG)
-
-        # 工具栏
-        toolbar = tk.Frame(win, bg=_FLUENT_BG)
-        toolbar.pack(fill="x", padx=16, pady=(12, 8))
-        self._make_button(toolbar, "刷新", self._refresh).pack(side="left")
-        self._make_button(toolbar, "清空历史", self._clear).pack(side="left", padx=(8, 0))
-        self._make_button(toolbar, "设置", self._open_settings).pack(side="right")
-
-        # 表格
-        table_frame = tk.Frame(win, bg=_FLUENT_BG)
-        table_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        columns = ("time", "title", "message")
-        self._tree = ttk.Treeview(
-            table_frame, columns=columns, show="headings", selectmode="browse"
+        link = tk.Label(
+            box, text=GITHUB_URL, font=(self._font, 10),
+            bg=DARK["window_bg"], fg=DARK["accent_text"], cursor="hand2",
         )
-        self._tree.heading("time", text="时间")
-        self._tree.heading("title", text="标题")
-        self._tree.heading("message", text="内容")
-        self._tree.column("time", width=160, anchor="w")
-        self._tree.column("title", width=180, anchor="w")
-        self._tree.column("message", width=380, anchor="w")
-        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self._tree.yview)
-        self._tree.configure(yscrollcommand=scrollbar.set)
-        self._tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        link._theme_role = "link"
+        link.pack(anchor="w")
+        link.bind("<Button-1>", lambda _e: webbrowser.open(GITHUB_URL))
 
-        self._tree.bind("<Double-1>", self._copy_message)
-        win.protocol("WM_DELETE_WINDOW", self._close)
+    def _sc(self, value: int) -> int:
+        return max(1, int(round(value * self._scale)))
 
-        # 居中
-        win.update_idletasks()
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        win.geometry(
-            f"{self._WIN_W}x{self._WIN_H}"
-            f"+{(sw - self._WIN_W) // 2}+{(sh - self._WIN_H) // 2}"
-        )
-        win.deiconify()
-        win.after(0, lambda: (win.lift(), win.focus_force()))
-        self._refresh()
-
-    def _make_button(self, parent: tk.Widget, text: str, command: Callable) -> tk.Button:
-        """创建扁平风格的工具栏按钮。"""
-        return tk.Button(
-            parent, text=f"  {text}  ", font=("Segoe UI", 9),
-            fg=_FLUENT_TEXT, bg=_FLUENT_SURFACE,
-            activeforeground=_FLUENT_TEXT, activebackground=_FLUENT_BORDER,
-            bd=0, cursor="hand2", relief="flat", command=command,
-        )
-
-    def _refresh(self):
-        """从数据库重新加载历史记录。"""
-        from src.history import get_messages
-        items = get_messages(limit=1000)
-        if self._tree is None:
-            return
-        for item in self._tree.get_children():
-            self._tree.delete(item)
-        for row in items:
-            self._tree.insert(
-                "", "end", values=(row["time"], row["title"], row["message"])
-            )
-
-    def _clear(self):
-        """清空历史（二次确认）。"""
-        if not messagebox.askyesno(
-            "清空历史", "确定清空全部推送历史？此操作不可恢复。", parent=self._win
-        ):
-            return
-        from src.history import clear_history
-        if clear_history():
-            self._refresh()
-
-    def _copy_message(self, _event):
-        """双击行复制消息正文到剪贴板。"""
-        if self._tree is None:
-            return
-        selection = self._tree.selection()
-        if not selection:
-            return
-        values = self._tree.item(selection[0], "values")
-        if len(values) >= 3 and self._win:
-            self._win.clipboard_clear()
-            self._win.clipboard_append(values[2])
-
-    def _open_settings(self):
-        """打开设置窗口。"""
-        if self._on_settings:
-            self._on_settings()
-
-    def _close(self):
-        """关闭历史窗口（程序保持常驻）。"""
-        if self._win and self._win.winfo_exists():
-            self._win.destroy()
-
-
-if __name__ == "__main__":
-    # 独立测试入口
-    test_cfg = {
-        "server": "http://your-server:8080",
-        "username": "your_username",
-        "password": "",
-        "topic": "sms",
-        "auto_start": False,
-        "auto_copy_otp": False,
-    }
-
-    def on_save(cfg):
-        print("保存的配置:", cfg)
-
-    root = tk.Tk()
-    root.withdraw()
-    win = SettingsWindow(test_cfg, on_save=on_save)
-    win.show_and_wait()
-    print("窗口已关闭")
+    def apply_theme(self, tokens):
+        self.frame.configure(bg=tokens["window_bg"])
+        _walk_apply(self.frame, tokens)

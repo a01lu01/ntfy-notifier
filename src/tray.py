@@ -57,14 +57,14 @@ def _make_fallback_icon(connected: bool) -> Image:
 
 
 # ── pystray Menu 项 ─────────────────────────────────────────────────────────
-def _make_menu(on_history: Optional[Callable], on_settings: Optional[Callable],
+def _make_menu(on_push: Optional[Callable], on_settings: Optional[Callable],
                on_quit: Optional[Callable]):
     """构建 pystray 菜单。"""
     import pystray
 
-    def history_action(icon=None, item=None):
-        if on_history:
-            on_history()
+    def push_action(icon=None, item=None):
+        if on_push:
+            on_push()
 
     def settings_action(icon=None, item=None):
         if on_settings:
@@ -75,19 +75,19 @@ def _make_menu(on_history: Optional[Callable], on_settings: Optional[Callable],
             on_quit()
 
     return pystray.Menu(
-        pystray.MenuItem("📋  推送历史...", history_action, default=True),
-        pystray.MenuItem("⚙️  设置...", settings_action),
-        pystray.MenuItem("❌  退出", quit_action),
+        pystray.MenuItem("推送", push_action, default=True),
+        pystray.MenuItem("设置", settings_action),
+        pystray.MenuItem("退出", quit_action),
     )
 
 
 # ── TrayIcon 类 ─────────────────────────────────────────────────────────────
 class TrayIcon:
     def __init__(self, on_settings: Optional[Callable] = None,
-                 on_history: Optional[Callable] = None,
+                 on_push: Optional[Callable] = None,
                  on_quit: Optional[Callable] = None):
         self._on_settings = on_settings
-        self._on_history = on_history
+        self._on_push = on_push
         self._on_quit = on_quit
         self._icon: Optional["pystray.Icon"] = None
         self._thread: Optional[threading.Thread] = None
@@ -122,7 +122,7 @@ class TrayIcon:
             self._connected = connected
             # 优先使用预加载的图标
             icon_image = self._get_cached_icon(connected)
-            menu = _make_menu(self._on_history, self._on_settings, self._on_quit)
+            menu = _make_menu(self._on_push, self._on_settings, self._on_quit)
 
             tip = "ntfy-Notifier · 已连接" if connected else "ntfy-Notifier · 未连接"
 

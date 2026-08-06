@@ -26,7 +26,9 @@ import requests
 from src.config import load_config, save_config
 from src.history import record_message
 from src.notifier import send_toast, NtfySSESubscriber
+from src.theme import ThemeManager
 from src.tray import TrayIcon
+from src.ui import MainWindow
 
 # ── 单例锁 ───────────────────────────────────────────
 
@@ -117,6 +119,30 @@ _connected = False
 _tray: Optional[TrayIcon] = None
 _root: "tk.Tk | None" = None
 _ui_queue: Optional[Queue] = None
+_main_window: Optional[MainWindow] = None
+_theme_manager: Optional[ThemeManager] = None
+
+
+def _enable_dpi_awareness():
+    """声明 Per-Monitor V2 DPI 感知（必须在创建任何 Tk 窗口前调用）。"""
+    try:
+        import ctypes
+        try:
+            if ctypes.windll.user32.SetProcessDpiAwarenessContext(-4):
+                return
+        except Exception:
+            pass
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            return
+        except Exception:
+            pass
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _set_auto_start(enabled: bool):
@@ -279,42 +305,36 @@ def _register_aumid():
         print(f"[ntfy] ⚠️ AUMID 注册失败: {e}", file=sys.stderr)
 
 
-def _open_settings():
-    """在主 Tk 线程中弹出设置窗口。"""
-    if _root is None:
-        return
+def _on_config_saved(cfg: dict):
+    """配置保存后的主程序处理：写盘、自启、重连订阅。"""
+    global _config, _subscriber
 
-    def on_save(cfg: dict):
-        global _config, _subscriber
-        
-        save_config(cfg)
-        _config = cfg
-        _set_auto_start(cfg.get("auto_start", False))
-        
-        # 重新连接 SSE：无论当前是否已连接都重启订阅，
-        # 保证断线状态下修改的配置也能立即生效
-        # 在后台线程中执行 stop + restart，避免 join 阻塞 Tk 主线程
-        if _subscriber is not None:
-            print("[ntfy] 配置已更新，后台重连 SSE...", file=sys.stderr)
-            
-            def _reconnect():
-                _subscriber.stop()
-                _start_sse_subscription()
-            
-            threading.Thread(target=_reconnect, daemon=True).start()
+    save_config(cfg)
+    _config = cfg
+    _set_auto_start(cfg.get("auto_start", False))
 
-    from src.ui import SettingsWindow
-    win = SettingsWindow(_config, on_save=on_save, on_cancel=None, master=_root)
-    win.show()
+    # 重新连接 SSE：无论当前是否已连接都重启订阅，
+    # 保证断线状态下修改的配置也能立即生效
+    if _subscriber is not None:
+        print("[ntfy] 配置已更新，后台重连 SSE...", file=sys.stderr)
+
+        def _reconnect():
+            _subscriber.stop()
+            _start_sse_subscription()
+
+        threading.Thread(target=_reconnect, daemon=True).start()
 
 
-def _open_history():
-    """在主 Tk 线程中打开推送历史窗口。"""
-    if _root is None:
-        return
-    from src.ui import HistoryWindow
-    win = HistoryWindow(master=_root, on_settings=_open_settings)
-    win.show()
+def _show_main(page: str = "push"):
+    """在主 Tk 线程中显示主窗口并切换页面。"""
+    if _main_window is not None:
+        _main_window.show_page(page)
+        _main_window.show()
+
+
+def _show_main_thread_safe(page: str = "push"):
+    """线程安全入口：托盘回调调用此函数。"""
+    _post_to_ui(lambda: _show_main(page))
 
 
 def _post_to_ui(fn):
@@ -340,16 +360,6 @@ def _drain_ui_queue():
             _root.after(50, _drain_ui_queue)
         except Exception:
             pass
-
-
-def _open_settings_thread_safe():
-    """线程安全入口：pystray 回调调用此函数，内部切换到主 Tk 线程。"""
-    _post_to_ui(_open_settings)
-
-
-def _open_history_thread_safe():
-    """线程安全入口：托盘点击历史入口时调用。"""
-    _post_to_ui(_open_history)
 
 
 def _quit_thread_safe():
@@ -459,7 +469,7 @@ def _start_sse_subscription():
 
 
 def main():
-    global _root, _config, _tray, _running, _ui_queue
+    global _root, _config, _tray, _running, _ui_queue, _main_window, _theme_manager
 
     import tkinter as tk
 
@@ -471,15 +481,35 @@ def main():
     # 注册 AUMID（让通知中心显示铃铛图标）
     _register_aumid()
 
+    # DPI 感知必须在创建 Tk 窗口前声明
+    _enable_dpi_awareness()
+
     # 单例 Tk root（始终存在，隐藏）
     _root = tk.Tk()
     _root.withdraw()
     # 拦截关闭，防止 root 被意外销毁
     _root.protocol("WM_DELETE_WINDOW", lambda: None)
 
+    # 计算显示缩放并同步 Tk 缩放系数
+    try:
+        dpi = _root.winfo_fpixels("1i")
+        scale = dpi / 96.0
+        _root.tk.call("tk", "scaling", dpi / 72.0)
+    except Exception:
+        scale = 1.0
+
     # 主线程 UI 任务队列（pystray/后台线程只投递，不直接操作 Tk）
     _ui_queue = Queue()
     _root.after(50, _drain_ui_queue)
+
+    # 主题引擎与主窗口
+    _theme_manager = ThemeManager(_config.get("theme_mode", "system"))
+    _main_window = MainWindow(_root, _config, _on_config_saved, _theme_manager, scale=scale)
+    _theme_manager.start_polling(
+        lambda _theme: _post_to_ui(
+            lambda: _main_window.apply_theme() if _main_window is not None else None
+        )
+    )
 
     if config_was_corrupt:
         _root.after(400, lambda: tk.messagebox.showwarning(
@@ -488,17 +518,17 @@ def main():
             parent=_root,
         ))
 
-    # 首次运行 → 在 mainloop 启动后立即弹出设置窗口（已在 Tk 线程，无需 after）
+    # 首次运行 → 在 mainloop 启动后立即打开设置页
     if is_first_run:
-        _root.after(200, _open_settings)
+        _root.after(200, lambda: _show_main("settings"))
 
     if _config.get("auto_start"):
         _set_auto_start(True)
 
     # 启动托盘（此时 Tk 已在运行），使用线程安全入口
     _tray = TrayIcon(
-        on_settings=_open_settings_thread_safe,
-        on_history=_open_history_thread_safe,
+        on_push=lambda: _show_main_thread_safe("push"),
+        on_settings=lambda: _show_main_thread_safe("settings"),
         on_quit=_quit_thread_safe,
     )
     _tray.start(connected=False)
@@ -524,8 +554,11 @@ def main():
 
 
 def _quit():
-    global _running, _subscriber, _tray
+    global _running, _subscriber, _tray, _theme_manager, _main_window
     _running = False
+
+    if _theme_manager:
+        _theme_manager.stop()
     
     if _subscriber:
         print("[ntfy] 正在关闭 SSE 订阅...", file=sys.stderr)
@@ -533,6 +566,9 @@ def _quit():
     
     if _tray:
         _tray.stop()
+
+    if _main_window:
+        _main_window.destroy()
     
     if _root:
         try:
