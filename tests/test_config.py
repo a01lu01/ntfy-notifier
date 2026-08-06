@@ -19,6 +19,9 @@ class ConfigTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
+    def test_default_topic_is_empty(self):
+        self.assertEqual(config.DEFAULT_CONFIG["topic"], "")
+
     def test_dpapi_roundtrip(self):
         if not config._DPAPI_AVAILABLE:
             self.skipTest("win32crypt 不可用")
@@ -30,7 +33,7 @@ class ConfigTest(unittest.TestCase):
             "server": "https://example.com",
             "username": "u",
             "password": "secret123",
-            "topic": "sms",
+            "topic": "test-topic",
             "auto_start": False,
             "auto_copy_otp": False,
         })
@@ -45,7 +48,7 @@ class ConfigTest(unittest.TestCase):
         config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         with open(config.CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump({"server": "https://example.com", "username": "u",
-                       "password": "secret123", "topic": "sms"}, f)
+                       "password": "secret123", "topic": "test-topic"}, f)
         cfg, first, corrupt = config.load_config()
         self.assertFalse(first)
         self.assertFalse(corrupt)

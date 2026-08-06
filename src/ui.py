@@ -614,7 +614,7 @@ class SettingsPage:
         self._build_input(left, "用户名", "username")
         self._build_input(right, "密码", "password", is_password=True)
 
-        self._build_input(connect_card, "主题", "topic", placeholder="sms")
+        self._build_input(connect_card, "主题", "topic", placeholder="your-topic")
 
         # 行为卡片
         behavior_card = self._make_card(outer, "行为")

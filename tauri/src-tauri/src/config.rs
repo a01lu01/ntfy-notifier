@@ -22,7 +22,7 @@ impl Default for Config {
             server: String::new(),
             username: String::new(),
             password: String::new(),
-            topic: "sms".to_string(),
+            topic: String::new(),
             theme_mode: "system".to_string(),
             auto_start: false,
             auto_copy_otp: false,
@@ -240,7 +240,7 @@ mod tests {
     fn default_config_shape() {
         let cfg = Config::default();
         assert_eq!(cfg.theme_mode, "system");
-        assert_eq!(cfg.topic, "sms");
+        assert_eq!(cfg.topic, "");
     }
 
     #[cfg(windows)]

@@ -150,8 +150,8 @@ mod tests {
     #[test]
     fn record_and_dedup() {
         let _guard = unique_env();
-        assert!(record_message("1", "sms", "t", "m").unwrap());
-        assert!(!record_message("1", "sms", "t", "m").unwrap());
+        assert!(record_message("1", "test-topic", "t", "m").unwrap());
+        assert!(!record_message("1", "test-topic", "t", "m").unwrap());
         let items = get_messages(10);
         assert_eq!(items.len(), 1);
     }
@@ -161,7 +161,7 @@ mod tests {
         let _guard = unique_env();
         clear_history().unwrap();
         for i in 0..1005 {
-            record_message(&i.to_string(), "sms", &format!("t{i}"), "m").unwrap();
+            record_message(&i.to_string(), "test-topic", &format!("t{i}"), "m").unwrap();
         }
         let items = get_messages(2000);
         assert!(items.len() <= 1000);

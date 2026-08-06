@@ -234,7 +234,7 @@ function buildSettingsPage() {
         <div class="field"><label>用户名</label><input type="text" id="set-username"></div>
         <div class="field"><label>密码</label><input type="password" id="set-password"></div>
       </div>
-      <div class="field"><label>主题</label><input type="text" id="set-topic" placeholder="sms"></div>
+      <div class="field"><label>主题</label><input type="text" id="set-topic" placeholder="your-topic"></div>
     </div>
     <div class="card">
       <h3>行为</h3>

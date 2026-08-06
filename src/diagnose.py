@@ -74,7 +74,7 @@ def main():
         if not server:
             log("[SKIP] 未配置服务器地址，跳过网络连接测试")
         else:
-            topic = cfg.get("topic", "sms")
+            topic = cfg.get("topic", "your-topic")
             url = f"{server.rstrip('/')}/{topic}/sse"
             log(f"目标: {url}")
 

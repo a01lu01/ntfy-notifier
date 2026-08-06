@@ -19,7 +19,7 @@ class HistoryTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_record_and_dedup(self):
-        msg = {"id": "1", "topic": "sms", "title": "t", "message": "m"}
+        msg = {"id": "1", "topic": "test-topic", "title": "t", "message": "m"}
         self.assertTrue(history.record_message(msg))
         self.assertFalse(history.record_message(msg))
         rows = history.get_messages()
@@ -29,13 +29,13 @@ class HistoryTest(unittest.TestCase):
     def test_prunes_to_max_history(self):
         for i in range(1005):
             self.assertTrue(history.record_message(
-                {"id": str(i), "topic": "sms", "title": f"t{i}", "message": f"m{i}"}
+                {"id": str(i), "topic": "test-topic", "title": f"t{i}", "message": f"m{i}"}
             ))
         rows = history.get_messages()
         self.assertLessEqual(len(rows), 1000)
 
     def test_clear(self):
-        history.record_message({"id": "1", "topic": "sms", "title": "t", "message": "m"})
+        history.record_message({"id": "1", "topic": "test-topic", "title": "t", "message": "m"})
         self.assertTrue(history.clear_history())
         self.assertEqual(history.get_messages(), [])
 

@@ -499,7 +499,7 @@ def subscribe_ntfy(server: str, topic: str, username: str = "", password: str = 
     
     Args:
         server:   ntfy 服务器地址，例如 http://your-server:8080
-        topic:    订阅话题，例如 sms
+        topic:    订阅话题，例如 your-topic
         username: 用户名（可选）
         password: 密码（可选）
     
@@ -507,7 +507,7 @@ def subscribe_ntfy(server: str, topic: str, username: str = "", password: str = 
         NtfySSESubscriber 实例
     
     Example:
-        subscriber = subscribe_ntfy("http://your-server:8080", "sms", "your_username", "your_password")
+        subscriber = subscribe_ntfy("http://your-server:8080", "your-topic", "your_username", "your_password")
         
         def on_message(msg):
             title = msg.get("title") or "ntfy 消息"
