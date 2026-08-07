@@ -1,4 +1,4 @@
-use crate::{clipboard, config::Config, history, notify, otp};
+use crate::{clipboard, config::Config, history, notify, rules};
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -156,7 +156,8 @@ async fn handle_line(line: &[u8], app: &AppHandle, cfg: &Config) {
     match history::record_message(&id, &topic, &title, &message) {
         Ok(true) => {
             if cfg.auto_copy_otp {
-                if let Some(otp) = otp::extract_otp(&message) {
+                let rule_list = rules::load();
+                if let Some(otp) = rules::find_otp(&message, &rule_list) {
                     let app2 = app.clone();
                     tauri::async_runtime::spawn_blocking(move || {
                         if let Err(e) = clipboard::copy_text(&otp) {

@@ -7,9 +7,16 @@ import {
   resizeColumnBoundary
 } from "./table-model.js";
 import { columnDragOptions } from "./table-drag.js";
+import {
+  newRule,
+  parseKeywords,
+  ruleSummary,
+  validateRule
+} from "./rules-model.js";
 
 const PAGES = [
   { id: "push", label: "推送" },
+  { id: "rules", label: "规则" },
   { id: "settings", label: "设置" },
   { id: "about", label: "关于" }
 ];
@@ -18,6 +25,8 @@ let currentPage = "push";
 let config = null;
 let uiState = null;
 let pushTable = null;
+let rules = [];
+let editingId = null;
 
 const COLUMNS = [
   { id: "time", title: "时间" },
@@ -50,6 +59,7 @@ function switchPage(id) {
     item.classList.toggle("active", page.id === id);
   }
   if (id === "push") refreshPush();
+  if (id === "rules") refreshRules();
   if (id === "settings") fillSettings();
 }
 
@@ -205,6 +215,211 @@ async function persistColumns() {
   uiState = await invoke("save_ui_state", { order, widths });
 }
 
+/* ---------- 规则页 ---------- */
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[c]);
+}
+
+function buildRulesPage() {
+  const page = el("page-rules");
+  page.innerHTML = `
+    <div class="page-title">规则</div>
+    <div class="page-subtitle">按列表顺序匹配，优先命中生效 · 总开关在设置页</div>
+    <div class="toolbar">
+      <button class="btn btn-primary" id="btn-add-rule">添加规则</button>
+    </div>
+    <div class="card" id="rule-editor" hidden>
+      <h3 id="rule-editor-title">新建规则</h3>
+      <div class="field">
+        <label>规则名称</label>
+        <input type="text" id="rule-name" placeholder="如：银行验证码">
+      </div>
+      <div class="field">
+        <label>触发关键词</label>
+        <input type="text" id="rule-keywords" placeholder="多个关键词用逗号分隔，如：验证码, OTP">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>最小位数</label>
+          <input type="number" id="rule-min" min="1" max="20">
+        </div>
+        <div class="field">
+          <label>最大位数</label>
+          <input type="number" id="rule-max" min="1" max="20">
+        </div>
+      </div>
+      <div class="field">
+        <label>匹配模式</label>
+        <div class="segmented" id="rule-mode" data-value="both">
+          <button type="button" class="seg-btn" data-value="keyword_only">关键词后</button>
+          <button type="button" class="seg-btn" data-value="whole_text">全文</button>
+          <button type="button" class="seg-btn" data-value="both">关键词后+全文回退</button>
+        </div>
+      </div>
+      <div class="switch-row">
+        <span>激活此规则</span>
+        <label class="switch">
+          <input type="checkbox" id="rule-enabled" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="toolbar" style="justify-content:flex-end">
+        <button class="btn btn-secondary" id="btn-rule-cancel">取消</button>
+        <button class="btn btn-primary" id="btn-rule-save">保存</button>
+      </div>
+    </div>
+    <div class="rule-list" id="rule-list" hidden></div>
+    <div class="empty" id="rules-empty" hidden>暂无规则，点击"添加规则"创建</div>
+    <div class="rule-hint" id="rules-hint">拖拽 ≡ 调整匹配优先级 · 停用或删除后即时生效</div>
+  `;
+  el("btn-add-rule").addEventListener("click", () => openEditor(null));
+  el("btn-rule-cancel").addEventListener("click", closeEditor);
+  el("btn-rule-save").addEventListener("click", saveRuleFromForm);
+  el("rule-mode").querySelectorAll(".seg-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      el("rule-mode").dataset.value = btn.dataset.value;
+      el("rule-mode").querySelectorAll(".seg-btn").forEach((b) => {
+        b.classList.toggle("active", b === btn);
+      });
+    });
+  });
+  makeRuleListSortable();
+}
+
+function renderRules() {
+  const list = el("rule-list");
+  list.innerHTML = "";
+  el("rules-empty").hidden = rules.length > 0;
+  list.hidden = rules.length === 0;
+  for (const rule of rules) {
+    const row = document.createElement("div");
+    row.className = "rule-row" + (rule.enabled ? "" : " off");
+    row.dataset.id = rule.id;
+    row.innerHTML = `
+      <span class="rule-drag-handle">≡</span>
+      <div class="rule-main">
+        <div class="rule-name">${escapeHtml(rule.name)}</div>
+        <div class="rule-summary">${escapeHtml(ruleSummary(rule))}</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" class="rule-toggle" ${rule.enabled ? "checked" : ""}>
+        <span class="slider"></span>
+      </label>
+      <div class="rule-actions">
+        <button class="btn btn-secondary rule-edit">编辑</button>
+        <button class="btn btn-danger rule-delete">删除</button>
+      </div>
+    `;
+    row.querySelector(".rule-toggle").addEventListener("change", (e) =>
+      toggleRule(rule.id, e.target.checked)
+    );
+    row.querySelector(".rule-edit").addEventListener("click", () => openEditor(rule));
+    row.querySelector(".rule-delete").addEventListener("click", () => deleteRule(rule.id));
+    list.appendChild(row);
+  }
+}
+
+function makeRuleListSortable() {
+  const list = el("rule-list");
+  if (!list) return;
+  Sortable.create(list, {
+    animation: 150,
+    draggable: ".rule-row",
+    handle: ".rule-drag-handle",
+    forceFallback: true,
+    fallbackClass: "sortable-fallback",
+    fallbackOnBody: true,
+    ghostClass: "sortable-ghost",
+    onEnd: async () => {
+      const byId = new Map(rules.map((r) => [r.id, r]));
+      const ordered = Array.from(list.querySelectorAll(".rule-row"))
+        .map((row) => byId.get(row.dataset.id))
+        .filter(Boolean);
+      if (ordered.length === rules.length) {
+        rules = ordered;
+        await persistRules();
+        renderRules();
+      }
+    }
+  });
+}
+
+async function refreshRules() {
+  rules = await invoke("get_rules");
+  renderRules();
+}
+
+async function persistRules() {
+  rules = await invoke("save_rules", { rules });
+}
+
+async function toggleRule(id, enabled) {
+  rules = rules.map((r) => (r.id === id ? { ...r, enabled } : r));
+  await persistRules();
+  renderRules();
+}
+
+async function deleteRule(id) {
+  const rule = rules.find((r) => r.id === id);
+  if (!rule) return;
+  if (!confirm(`确定删除规则"${rule.name}"？此操作不可恢复。`)) return;
+  rules = rules.filter((r) => r.id !== id);
+  await persistRules();
+  renderRules();
+}
+
+function openEditor(rule) {
+  editingId = rule ? rule.id : null;
+  el("rule-editor-title").textContent = rule ? "编辑规则" : "新建规则";
+  el("rule-name").value = rule ? rule.name : "";
+  el("rule-keywords").value = rule ? rule.keywords.join(", ") : "";
+  el("rule-min").value = rule ? rule.min_length : 4;
+  el("rule-max").value = rule ? rule.max_length : 8;
+  const mode = rule ? rule.match_mode : "both";
+  el("rule-mode").dataset.value = mode;
+  el("rule-mode").querySelectorAll(".seg-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.value === mode);
+  });
+  el("rule-enabled").checked = rule ? rule.enabled : true;
+  el("rule-editor").hidden = false;
+}
+
+function closeEditor() {
+  el("rule-editor").hidden = true;
+  editingId = null;
+}
+
+async function saveRuleFromForm() {
+  const draft = editingId ? rules.find((r) => r.id === editingId) : null;
+  const rule = draft ? { ...draft } : newRule();
+  rule.name = el("rule-name").value.trim();
+  rule.keywords = parseKeywords(el("rule-keywords").value);
+  rule.min_length = parseInt(el("rule-min").value, 10) || 1;
+  rule.max_length = parseInt(el("rule-max").value, 10) || 1;
+  rule.match_mode = el("rule-mode").dataset.value || "both";
+  rule.enabled = el("rule-enabled").checked;
+  const error = validateRule(rule);
+  if (error) {
+    alert(error);
+    return;
+  }
+  if (draft) {
+    rules = rules.map((r) => (r.id === draft.id ? rule : r));
+  } else {
+    rules.push(rule);
+  }
+  await persistRules();
+  closeEditor();
+  renderRules();
+}
+
 /* ---------- 设置页 ---------- */
 
 function fillSettings() {
@@ -322,6 +537,7 @@ async function init() {
   applyTheme();
   buildNav();
   buildPushPage();
+  buildRulesPage();
   buildSettingsPage();
   buildAboutPage();
   switchPage("push");

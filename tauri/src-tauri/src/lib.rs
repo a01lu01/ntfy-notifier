@@ -4,6 +4,7 @@ mod history;
 mod notify;
 mod ntfy;
 mod otp;
+mod rules;
 mod startup;
 mod ui_state;
 
@@ -61,6 +62,17 @@ fn save_ui_state(
 ) -> Result<ui_state::UiState, String> {
     ui_state::save(order, widths)?;
     Ok(ui_state::load())
+}
+
+#[tauri::command]
+fn get_rules() -> Vec<rules::Rule> {
+    rules::load()
+}
+
+#[tauri::command]
+fn save_rules(rules: Vec<crate::rules::Rule>) -> Result<Vec<crate::rules::Rule>, String> {
+    crate::rules::save(&rules)?;
+    Ok(crate::rules::load())
 }
 
 fn show_main(app: &AppHandle, page: &str) {
@@ -166,7 +178,9 @@ pub fn run() {
             get_messages,
             clear_history,
             get_ui_state,
-            save_ui_state
+            save_ui_state,
+            get_rules,
+            save_rules
         ])
         .setup(|app| {
             let handle = app.handle().clone();

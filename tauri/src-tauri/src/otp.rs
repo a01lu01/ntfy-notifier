@@ -1,15 +1,9 @@
-use regex::Regex;
-use std::sync::OnceLock;
+/// 关键词后查找数字段的窗口大小（字符数）。
+pub const KEYWORD_WINDOW: usize = 30;
 
-static KEYWORDS: OnceLock<Regex> = OnceLock::new();
-fn keywords() -> &'static Regex {
-    KEYWORDS.get_or_init(|| {
-        Regex::new(r"(验证码|动态码|校验码|安全码|一次性密码|OTP)").unwrap()
-    })
-}
-
-/// 查找第一个前后都不是数字的 4-8 位数字段（避免正则环视限制）。
-fn find_digit_run(text: &str) -> Option<String> {
+/// 在文本中查找第一个长度落在 [min_len, max_len] 内的独立数字段。
+/// 独立数字段 = 连续数字且前后不是数字（或文本边界）。
+pub fn extract_digit_run(text: &str, min_len: usize, max_len: usize) -> Option<String> {
     let mut start: Option<usize> = None;
     let mut count = 0usize;
     for (idx, ch) in text.char_indices() {
@@ -19,60 +13,140 @@ fn find_digit_run(text: &str) -> Option<String> {
             }
             count += 1;
         } else if let Some(s) = start.take() {
-            if (4..=8).contains(&count) {
+            if (min_len..=max_len).contains(&count) {
                 return Some(text[s..idx].to_string());
             }
             count = 0;
         }
     }
     if let Some(s) = start {
-        if (4..=8).contains(&count) {
+        if (min_len..=max_len).contains(&count) {
             return Some(text[s..].to_string());
         }
     }
     None
 }
 
-/// 提取 4-8 位纯数字验证码：优先关键词后 30 字符内，再全文首个独立数字段。
-pub fn extract_otp(text: &str) -> Option<String> {
-    if text.is_empty() {
-        return None;
+/// 在关键词后 `window` 字符内查找第一个长度合规的独立数字段。
+/// 多个关键词按出现位置从左到右依次尝试，任一命中即返回。
+pub fn extract_after_keyword(
+    text: &str,
+    keywords: &[String],
+    min_len: usize,
+    max_len: usize,
+    window: usize,
+) -> Option<String> {
+    let mut hits: Vec<(usize, usize)> = Vec::new();
+    for kw in keywords {
+        if kw.is_empty() {
+            continue;
+        }
+        for (idx, _) in text.match_indices(kw) {
+            hits.push((idx, idx + kw.len()));
+        }
     }
-    for m in keywords().find_iter(text) {
-        let end = std::cmp::min(m.end() + 30, text.len());
-        if let Some(otp) = find_digit_run(&text[m.end()..end]) {
+    hits.sort_unstable();
+    for (_, end) in hits {
+        let to = std::cmp::min(end + window, text.len());
+        if let Some(otp) = extract_digit_run(&text[end..to], min_len, max_len) {
             return Some(otp);
         }
     }
-    find_digit_run(text)
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::extract_otp;
+    use super::*;
 
     #[test]
-    fn google_message_returns_pure_digits() {
-        assert_eq!(extract_otp("G-000000是您的Google验证码").as_deref(), Some("000000"));
+    fn digit_run_extracts_first_qualifying_run() {
+        assert_eq!(
+            extract_digit_run("您的验证码是123456，5分钟内有效", 4, 8).as_deref(),
+            Some("123456")
+        );
     }
 
     #[test]
-    fn keyword_before_digits() {
-        assert_eq!(extract_otp("您的验证码是123456，5分钟内有效").as_deref(), Some("123456"));
+    fn digit_run_matches_embedded_run() {
+        assert_eq!(extract_digit_run("abc1234xyz", 4, 8).as_deref(), Some("1234"));
     }
 
     #[test]
-    fn keyword_colon() {
-        assert_eq!(extract_otp("Google验证码：888888").as_deref(), Some("888888"));
+    fn digit_run_rejects_too_long_run() {
+        assert_eq!(extract_digit_run("验证码是1234567890，已失效", 4, 8), None);
     }
 
     #[test]
-    fn too_long_not_matched() {
-        assert_eq!(extract_otp("您的验证码是1234567890，已失效"), None);
+    fn digit_run_rejects_too_short_for_min() {
+        assert_eq!(extract_digit_run("验证码8888", 6, 8), None);
     }
 
     #[test]
-    fn no_digits() {
-        assert_eq!(extract_otp("本次没有验证码"), None);
+    fn digit_run_honors_fixed_length() {
+        assert_eq!(extract_digit_run("验证码123456", 6, 6).as_deref(), Some("123456"));
+    }
+
+    #[test]
+    fn digit_run_no_digits() {
+        assert_eq!(extract_digit_run("本次没有验证码", 4, 8), None);
+    }
+
+    #[test]
+    fn digit_run_empty_text() {
+        assert_eq!(extract_digit_run("", 4, 8), None);
+    }
+
+    #[test]
+    fn after_keyword_ignores_leading_number() {
+        assert_eq!(
+            extract_after_keyword(
+                "订单号20260805，验证码112233",
+                &["验证码".to_string()],
+                4,
+                8,
+                30
+            )
+            .as_deref(),
+            Some("112233")
+        );
+    }
+
+    #[test]
+    fn after_keyword_honors_window() {
+        let text = format!("验证码{}123456", "x".repeat(33));
+        assert_eq!(extract_after_keyword(&text, &["验证码".to_string()], 4, 8, 30), None);
+        assert_eq!(
+            extract_after_keyword(&text, &["验证码".to_string()], 4, 8, 40).as_deref(),
+            Some("123456")
+        );
+    }
+
+    #[test]
+    fn after_keyword_leftmost_occurrence_wins() {
+        assert_eq!(
+            extract_after_keyword(
+                "验证码1234 动态码5678",
+                &["验证码".to_string(), "动态码".to_string()],
+                4,
+                8,
+                30
+            )
+            .as_deref(),
+            Some("1234")
+        );
+    }
+
+    #[test]
+    fn after_keyword_no_keyword() {
+        assert_eq!(extract_after_keyword("123456", &["验证码".to_string()], 4, 8, 30), None);
+    }
+
+    #[test]
+    fn after_keyword_rejects_too_long_run() {
+        assert_eq!(
+            extract_after_keyword("验证码是1234567890", &["验证码".to_string()], 4, 8, 30),
+            None
+        );
     }
 }
