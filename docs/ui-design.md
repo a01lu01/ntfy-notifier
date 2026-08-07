@@ -156,7 +156,7 @@ font-family: "HarmonyOS Sans SC", "Segoe UI", system-ui, sans-serif;
 | 标题 `title` | 220px | 80px |
 | 内容 `message` | 640px | 160px |
 
-实际列宽会保存到 `%APPDATA%\ntfy-notifier\ui_state.json`，用户拖宽后以保存值为准；前端拖宽的最小限制为 80px，后端再按上表最小宽度兜底。
+实际列宽会保存到 `%APPDATA%\ntfy-notifier\ui_state.json`，用户拖宽后以保存值为准。前端按各列最小宽度限制拖宽（与上表一致），后端再做一次最小宽度兜底。
 
 ### 3.8 滚动条
 
@@ -192,7 +192,7 @@ font-family: "HarmonyOS Sans SC", "Segoe UI", system-ui, sans-serif;
 ## 5. 表格交互
 
 - 拖拽表头排序：使用 SortableJS，配置 `forceFallback` + `fallbackOnBody`，避免 WebView2 原生拖拽不稳定。
-- 调整列宽：每列表头右侧有 8px 宽的 `.resize-handle`，内部有一条 1px 分隔线，悬停/拖动时变为主题色。
+- 调整列宽：每列表头右侧有 8px 宽的 `.resize-handle`，内部有一条 1px 分隔线，悬停/拖动时变为主题色。拖动分界线时采用**相邻列补偿**：只改变当前列与右侧相邻列（一增一减，总宽不变），其他列不动；拖到最小宽度时自动停止。
 - 列顺序与列宽都会保存到 `ui_state.json`，下次启动恢复。
 
 ## 6. 修改入口
@@ -204,4 +204,3 @@ font-family: "HarmonyOS Sans SC", "Segoe UI", system-ui, sans-serif;
 | 列默认宽度、最小宽度 | `tauri/src-tauri/src/ui_state.rs` |
 | 窗口默认尺寸 | `tauri/src-tauri/tauri.conf.json` |
 | 字体文件 | `tauri/public/assets/fonts/HarmonyOS_Sans_Regular.ttf` |
-
