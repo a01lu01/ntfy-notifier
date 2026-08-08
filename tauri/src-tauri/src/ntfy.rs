@@ -1,4 +1,8 @@
-use crate::{clipboard, config::Config, history, notify, rules};
+use crate::{config::Config, history, rules};
+#[cfg(target_os = "windows")]
+use crate::{clipboard, notify};
+#[cfg(mobile)]
+use crate::notify_mobile;
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +40,7 @@ impl NtfyManager {
     }
 }
 
+#[cfg(desktop)]
 fn update_tray(app: &AppHandle, connected: bool) {
     if let Some(tray) = app.tray_by_id("main") {
         let bytes: &[u8] = if connected {
@@ -82,6 +87,7 @@ async fn run_loop(cfg: Config, app: AppHandle, connected: Arc<AtomicBool>) {
             Ok(resp) if resp.status().is_success() => {
                 delay = Duration::from_secs(5);
                 connected.store(true, Ordering::SeqCst);
+                #[cfg(desktop)]
                 update_tray(&app, true);
                 let _ = app.emit("connection", true);
 
@@ -113,6 +119,7 @@ async fn run_loop(cfg: Config, app: AppHandle, connected: Arc<AtomicBool>) {
         }
 
         connected.store(false, Ordering::SeqCst);
+        #[cfg(desktop)]
         update_tray(&app, false);
         let _ = app.emit("connection", false);
 
@@ -155,19 +162,37 @@ async fn handle_line(line: &[u8], app: &AppHandle, cfg: &Config) {
 
     match history::record_message(&id, &topic, &title, &message) {
         Ok(true) => {
-            if cfg.auto_copy_otp {
-                let rule_list = rules::load();
-                if let Some(otp) = rules::find_otp(&message, &rule_list) {
-                    let app2 = app.clone();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        if let Err(e) = clipboard::copy_text(&otp) {
-                            eprintln!("[ntfy] 验证码复制失败：{e}");
-                        }
-                        let _ = app2.emit("history-updated", ());
-                    });
+            #[cfg(target_os = "windows")]
+            {
+                if cfg.auto_copy_otp {
+                    let rule_list = rules::load();
+                    if let Some(otp) = rules::find_otp(&message, &rule_list) {
+                        let app2 = app.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            if let Err(e) = clipboard::copy_text(&otp) {
+                                eprintln!("[ntfy] 验证码复制失败：{e}");
+                            }
+                            let _ = app2.emit("history-updated", ());
+                        });
+                    }
+                }
+                notify::show(&title, &message, "ntfy-Notifier");
+            }
+
+            #[cfg(mobile)]
+            {
+                let otp = rules::find_otp(&message, &rules::load());
+                notify_mobile::update_notifications(app, &title, &message, otp.as_deref());
+                if cfg.auto_copy_otp {
+                    if let Some(otp) = otp {
+                        let app2 = app.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            notify_mobile::copy_to_clipboard(&app2, &otp);
+                        });
+                    }
                 }
             }
-            notify::show(&title, &message, "ntfy-Notifier");
+
             let _ = app.emit("history-updated", ());
         }
         _ => {}

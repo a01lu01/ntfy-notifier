@@ -6,25 +6,6 @@ use std::sync::Mutex;
 
 static LOCK: Mutex<()> = Mutex::new(());
 const MAX_HISTORY: usize = 1000;
-static APP_DATA_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
-
-#[cfg(test)]
-fn set_test_dir(dir: PathBuf) {
-    *APP_DATA_OVERRIDE.lock().unwrap() = Some(dir);
-}
-
-fn appdata_dir() -> PathBuf {
-    if let Some(dir) = APP_DATA_OVERRIDE.lock().unwrap().clone() {
-        return dir;
-    }
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        PathBuf::from(appdata)
-    } else if let Some(home) = dirs::home_dir() {
-        home.join("AppData").join("Roaming")
-    } else {
-        PathBuf::from(".")
-    }
-}
 
 #[derive(Serialize, Clone)]
 pub struct HistoryItem {
@@ -34,7 +15,7 @@ pub struct HistoryItem {
 }
 
 fn db_path() -> PathBuf {
-    appdata_dir().join("ntfy-notifier").join("history.db")
+    crate::appdata::resolve().join("history.db")
 }
 
 fn open() -> Result<Connection, String> {
@@ -131,10 +112,9 @@ mod tests {
     use std::sync::MutexGuard;
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_env() -> MutexGuard<'static, ()> {
-        let guard = TEST_LOCK.lock().unwrap();
+        let guard = crate::appdata::test_lock().lock().unwrap();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
             "ntfy-test-history-{}-{}",
@@ -143,7 +123,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        set_test_dir(dir);
+        crate::appdata::set(dir);
         guard
     }
 

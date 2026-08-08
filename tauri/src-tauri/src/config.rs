@@ -44,18 +44,8 @@ struct DiskConfig {
     password_encrypted: String,
 }
 
-fn data_dir() -> PathBuf {
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        PathBuf::from(appdata).join("ntfy-notifier")
-    } else if let Some(home) = dirs::home_dir() {
-        home.join("AppData").join("Roaming").join("ntfy-notifier")
-    } else {
-        PathBuf::from("ntfy-notifier")
-    }
-}
-
 pub fn config_path() -> PathBuf {
-    data_dir().join("config.json")
+    crate::appdata::resolve().join("config.json")
 }
 
 pub fn load_config() -> (Config, bool) {

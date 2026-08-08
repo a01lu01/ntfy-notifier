@@ -1,20 +1,35 @@
-mod clipboard;
+mod appdata;
 mod config;
 mod history;
-mod notify;
 mod ntfy;
 mod otp;
 mod rules;
-mod startup;
 mod ui_state;
 
-use std::collections::HashMap;
+#[cfg(mobile)]
+mod notify_mobile;
+
+#[cfg(target_os = "windows")]
+mod clipboard;
+#[cfg(target_os = "windows")]
+mod notify;
+#[cfg(target_os = "windows")]
+mod startup;
+
+#[cfg(desktop)]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(desktop)]
 use std::sync::{Arc, Mutex};
+#[cfg(desktop)]
 use std::time::{Duration, Instant};
+#[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem};
+#[cfg(desktop)]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
+#[cfg(desktop)]
+use tauri::Emitter;
+use std::collections::HashMap;
 
 pub struct AppState {
     pub ntfy: ntfy::NtfyManager,
@@ -32,10 +47,17 @@ fn save_config(
     app: AppHandle,
 ) -> Result<config::Config, String> {
     config::save_config(&config)?;
-    let exe = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    let _ = startup::set_auto_start(config.auto_start, &exe);
+    #[cfg(target_os = "windows")]
+    {
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let _ = startup::set_auto_start(config.auto_start, &exe);
+    }
+    #[cfg(mobile)]
+    {
+        notify_mobile::set_auto_start(&app, config.auto_start);
+    }
     state.ntfy.restart(config.clone(), app);
     Ok(config)
 }
@@ -75,6 +97,12 @@ fn save_rules(rules: Vec<crate::rules::Rule>) -> Result<Vec<crate::rules::Rule>,
     Ok(crate::rules::load())
 }
 
+#[tauri::command]
+fn is_mobile() -> bool {
+    cfg!(mobile)
+}
+
+#[cfg(desktop)]
 fn show_main(app: &AppHandle, page: &str) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
@@ -84,12 +112,14 @@ fn show_main(app: &AppHandle, page: &str) {
     let _ = app.emit("navigate", page);
 }
 
+#[cfg(desktop)]
 #[derive(Default)]
 struct TrayClickState {
     generation: AtomicU64,
     last_double_click: Mutex<Option<Instant>>,
 }
 
+#[cfg(desktop)]
 impl TrayClickState {
     fn is_recent_double_click(&self) -> bool {
         self.last_double_click
@@ -133,6 +163,7 @@ impl TrayClickState {
     }
 }
 
+#[cfg(desktop)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,10 +196,33 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app, "push");
-        }))
+        }));
+    }
+
+    #[cfg(mobile)]
+    {
+        builder = builder.plugin(notify_mobile::init());
+    }
+
+    builder = builder.plugin(tauri_plugin_dialog::init());
+
+    #[cfg(desktop)]
+    {
+        builder = builder.on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        });
+    }
+
+    builder
         .manage(AppState {
             ntfy: ntfy::NtfyManager::new(),
         })
@@ -180,67 +234,82 @@ pub fn run() {
             get_ui_state,
             save_ui_state,
             get_rules,
-            save_rules
+            save_rules,
+            is_mobile
         ])
         .setup(|app| {
-            let handle = app.handle().clone();
-            let cfg = config::load_config().0;
-            let exe = std::env::current_exe()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            let _ = startup::register_aumid(&exe);
-            if cfg.auto_start {
-                let _ = startup::set_auto_start(true, &exe);
+            #[cfg(mobile)]
+            {
+                if let Ok(dir) = app.path().app_data_dir() {
+                    appdata::set(dir);
+                }
             }
 
-            let push = MenuItem::with_id(app, "push", "推送", true, None::<&str>)?;
-            let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&push, &settings, &quit])?;
-            let click_state = Arc::new(TrayClickState::default());
+            let handle = app.handle().clone();
+            let cfg = config::load_config().0;
 
-            TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "push" => show_main(app, "push"),
-                    "settings" => show_main(app, "settings"),
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .on_tray_icon_event(move |tray, event| {
-                    match event {
-                        TrayIconEvent::Click {
-                            button: MouseButton::Left,
-                            button_state: MouseButtonState::Up,
-                            ..
-                        } => {
-                            click_state.on_left_up(tray.clone());
-                        }
-                        TrayIconEvent::DoubleClick {
-                            button: MouseButton::Left,
-                            ..
-                        } => {
-                            click_state.on_double_click(tray.app_handle());
-                        }
-                        TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. } => {
-                            click_state.invalidate();
-                        }
+            #[cfg(target_os = "windows")]
+            {
+                let exe = std::env::current_exe()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                let _ = startup::register_aumid(&exe);
+                if cfg.auto_start {
+                    let _ = startup::set_auto_start(true, &exe);
+                }
+            }
+
+            #[cfg(desktop)]
+            {
+                let push = MenuItem::with_id(app, "push", "推送", true, None::<&str>)?;
+                let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&push, &settings, &quit])?;
+                let click_state = Arc::new(TrayClickState::default());
+
+                TrayIconBuilder::with_id("main")
+                    .icon(app.default_window_icon().unwrap().clone())
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "push" => show_main(app, "push"),
+                        "settings" => show_main(app, "settings"),
+                        "quit" => app.exit(0),
                         _ => {}
-                    }
-                })
-                .build(app)?;
+                    })
+                    .on_tray_icon_event(move |tray, event| {
+                        match event {
+                            TrayIconEvent::Click {
+                                button: MouseButton::Left,
+                                button_state: MouseButtonState::Up,
+                                ..
+                            } => {
+                                click_state.on_left_up(tray.clone());
+                            }
+                            TrayIconEvent::DoubleClick {
+                                button: MouseButton::Left,
+                                ..
+                            } => {
+                                click_state.on_double_click(tray.app_handle());
+                            }
+                            TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. } => {
+                                click_state.invalidate();
+                            }
+                            _ => {}
+                        }
+                    })
+                    .build(app)?;
+            }
+
+            #[cfg(mobile)]
+            {
+                notify_mobile::start_service(&handle);
+                notify_mobile::set_auto_start(&handle, cfg.auto_start);
+            }
 
             let state = app.state::<AppState>();
             state.ntfy.restart(cfg, handle);
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
-            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -3,12 +3,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 const DEFAULT_ORDER: [&str; 3] = ["time", "title", "message"];
 const DEFAULT_WIDTHS: [(&str, i64); 3] = [("time", 180), ("title", 220), ("message", 640)];
 const MIN_WIDTHS: [(&str, i64); 3] = [("time", 120), ("title", 80), ("message", 160)];
-static APP_DATA_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 fn standard_column_id(legacy: &str) -> String {
     match legacy {
@@ -16,24 +14,6 @@ fn standard_column_id(legacy: &str) -> String {
         "标题" => "title".to_string(),
         "内容" => "message".to_string(),
         other => other.to_string(),
-    }
-}
-
-#[cfg(test)]
-fn set_test_dir(dir: PathBuf) {
-    *APP_DATA_OVERRIDE.lock().unwrap() = Some(dir);
-}
-
-fn appdata_dir() -> PathBuf {
-    if let Some(dir) = APP_DATA_OVERRIDE.lock().unwrap().clone() {
-        return dir;
-    }
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        PathBuf::from(appdata)
-    } else if let Some(home) = dirs::home_dir() {
-        home.join("AppData").join("Roaming")
-    } else {
-        PathBuf::from(".")
     }
 }
 
@@ -56,7 +36,7 @@ impl Default for UiState {
 }
 
 fn state_path() -> PathBuf {
-    appdata_dir().join("ntfy-notifier").join("ui_state.json")
+    crate::appdata::resolve().join("ui_state.json")
 }
 
 pub fn load() -> UiState {
@@ -116,13 +96,12 @@ pub fn save(order: Vec<String>, widths: HashMap<String, i64>) -> Result<(), Stri
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_env() -> MutexGuard<'static, ()> {
-        let guard = TEST_LOCK.lock().unwrap();
+        let guard = crate::appdata::test_lock().lock().unwrap();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
             "ntfy-test-uistate-{}-{}",
@@ -131,7 +110,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        set_test_dir(dir);
+        crate::appdata::set(dir);
         guard
     }
 

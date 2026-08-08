@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { confirm as dialogConfirm, message as dialogMessage } from "@tauri-apps/plugin-dialog";
 import Sortable from "sortablejs";
 import {
   cellValuesForOrder,
@@ -37,6 +38,22 @@ const COLUMNS = [
 const MIN_COLUMN_WIDTHS = { time: 120, title: 80, message: 160 };
 
 function el(id) { return document.getElementById(id); }
+
+async function confirmBox(message, title) {
+  try {
+    return await dialogConfirm(message, { title, kind: "warning" });
+  } catch {
+    return false;
+  }
+}
+
+async function alertBox(message, title) {
+  try {
+    await dialogMessage(message, { title });
+  } catch {
+    // 平台不支持原生消息框时静默
+  }
+}
 
 function buildNav() {
   const nav = el("nav");
@@ -118,7 +135,7 @@ function buildPushPage() {
   pushTable = el("push-table");
   el("btn-refresh").addEventListener("click", refreshPush);
   el("btn-clear").addEventListener("click", async () => {
-    if (confirm("确定清空全部推送历史？此操作不可恢复。")) {
+    if (await confirmBox("确定清空全部推送历史？此操作不可恢复。", "清空历史")) {
       await invoke("clear_history");
       refreshPush();
     }
@@ -369,7 +386,7 @@ async function toggleRule(id, enabled) {
 async function deleteRule(id) {
   const rule = rules.find((r) => r.id === id);
   if (!rule) return;
-  if (!confirm(`确定删除规则"${rule.name}"？此操作不可恢复。`)) return;
+  if (!(await confirmBox(`确定删除规则"${rule.name}"？此操作不可恢复。`, "删除规则"))) return;
   rules = rules.filter((r) => r.id !== id);
   await persistRules();
   renderRules();
@@ -407,7 +424,7 @@ async function saveRuleFromForm() {
   rule.enabled = el("rule-enabled").checked;
   const error = validateRule(rule);
   if (error) {
-    alert(error);
+    await alertBox(error, "无法保存规则");
     return;
   }
   if (draft) {
@@ -495,7 +512,7 @@ function buildSettingsPage() {
       auto_copy_otp: el("set-autocopy").checked
     };
     if (next.server.startsWith("http://") && next.password) {
-      if (!confirm("当前服务器地址使用 http://，密码将以明文在网络上传输，建议改用 https://。仍要保存吗？")) return;
+      if (!(await confirmBox("当前服务器地址使用 http://，密码将以明文在网络上传输，建议改用 https://。仍要保存吗？", "安全提示"))) return;
     }
     config = await invoke("save_config", { config: next });
     applyTheme();
