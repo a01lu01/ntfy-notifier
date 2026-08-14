@@ -9,6 +9,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.IBinder
 import android.widget.Toast
@@ -20,8 +21,8 @@ import com.why.ntfy_notifier.R
 class NotificationService : Service() {
 
   companion object {
-    const val CHANNEL_LATEST = "ntfy-latest"
-    const val CHANNEL_ALERTS = "ntfy-alerts"
+    const val CHANNEL_LATEST = "ntfy-latest-v2"
+    const val CHANNEL_ALERTS = "ntfy-alerts-v2"
     const val NOTIFICATION_ID_LATEST = 1001
     const val NOTIFICATION_ID_ALERT = 1002
     const val ACTION_COPY_OTP = "app.ntfy.notifier.COPY_OTP"
@@ -70,6 +71,8 @@ class NotificationService : Service() {
   override fun onCreate() {
     super.onCreate()
     instance = this
+    // 清掉旧版本残留通知，避免系统继续展示旧图标
+    getSystemService(NotificationManager::class.java).cancelAll()
     createChannels()
     refreshLatest()
   }
@@ -109,14 +112,20 @@ class NotificationService : Service() {
 
   private fun refreshLatest() {
     val builder = NotificationCompat.Builder(this, CHANNEL_LATEST)
-      .setSmallIcon(R.mipmap.ic_launcher)
-      .setContentTitle("最新推送")
-      .setContentText(latestMessage)
+      .setSmallIcon(R.drawable.ic_stat_ntfy)
+      .setLargeIcon(BitmapFactory.decodeResource(resources, R.drawable.ic_notification_large))
+      .setContentTitle("ntfy-Notifier 运行中")
+      .setContentText(
+        if (latestTitle == "ntfy-Notifier" && latestMessage == "等待推送…") {
+          "正在接收推送，点击查看最新消息"
+        } else {
+          "最新：$latestMessage"
+        }
+      )
       .setOngoing(true)
       .setOnlyAlertOnce(true)
       .setCategory(NotificationCompat.CATEGORY_SERVICE)
       .setContentIntent(mainActivityIntent())
-      .setStyle(messagingStyle())
     latestOtp?.takeIf { it.isNotEmpty() }?.let { otp ->
       builder.addAction(0, "复制验证码", copyOtpIntent(otp))
     }
@@ -132,7 +141,8 @@ class NotificationService : Service() {
     val style = NotificationCompat.MessagingStyle("ntfy")
     style.addMessage(message, System.currentTimeMillis(), title)
     val builder = NotificationCompat.Builder(this, CHANNEL_ALERTS)
-      .setSmallIcon(R.mipmap.ic_launcher)
+      .setSmallIcon(R.drawable.ic_stat_ntfy)
+      .setLargeIcon(BitmapFactory.decodeResource(resources, R.drawable.ic_notification_large))
       .setContentTitle(title)
       .setContentText(message)
       .setAutoCancel(true)
@@ -143,12 +153,6 @@ class NotificationService : Service() {
       builder.addAction(0, "复制验证码", copyOtpIntent(code))
     }
     getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID_ALERT, builder.build())
-  }
-
-  private fun messagingStyle(): NotificationCompat.MessagingStyle {
-    val style = NotificationCompat.MessagingStyle("ntfy")
-    style.addMessage(latestMessage, System.currentTimeMillis(), latestTitle)
-    return style
   }
 
   private fun mainActivityIntent(): PendingIntent {

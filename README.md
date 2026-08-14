@@ -18,7 +18,7 @@ Windows 系统托盘 / Android 常驻通知工具，订阅 ntfy 消息并弹出�
 - 明/暗主题：跟随系统或手动切换
 - 开机自启（Windows 注册表 / Android Boot 广播）、单实例运行（Windows）
 - 密码使用 Windows DPAPI 加密后保存
-- Android 窄屏适配：竖屏/窄屏自动切换底部导航栏，推送历史表格可横向滑动
+- Android 窄屏适配：竖屏/窄屏自动切换底部导航栏，自动避让状态栏与手势条安全区，推送历史表格可横向滑动
 
 ## 下载
 
@@ -27,7 +27,7 @@ Windows 系统托盘 / Android 常驻通知工具，订阅 ntfy 消息并弹出�
 <https://github.com/a01lu01/ntfy-notifier/releases>
 
 - `ntfy-notifier.exe`：便携版，直接运行
-- `ntfy-Notifier_1.0.0_x64-setup.exe`：NSIS 安装包
+- `ntfy-Notifier_1.1.6_x64-setup.exe`：NSIS 安装包
 
 ## 开发环境
 
@@ -74,7 +74,7 @@ npm run tauri build
 产物：
 
 - 便携版：`tauri/src-tauri/target/release/ntfy-notifier.exe`
-- 安装包：`tauri/src-tauri/target/release/bundle/nsis/ntfy-Notifier_1.0.0_x64-setup.exe`
+- 安装包：`tauri/src-tauri/target/release/bundle/nsis/ntfy-Notifier_1.1.6_x64-setup.exe`
 
 ## Android 构建
 

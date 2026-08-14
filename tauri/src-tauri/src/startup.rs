@@ -33,17 +33,10 @@ fn appdata() -> PathBuf {
 pub fn register_aumid(exe: &str) -> Result<(), String> {
     let data_dir = appdata().join("ntfy-notifier");
     let _ = std::fs::create_dir_all(&data_dir);
-    let icon = data_dir.join("connected.ico");
-    if !icon.exists() {
-        // 尝试从 exe 同目录复制
-        let src = PathBuf::from(exe)
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("connected.ico");
-        if src.exists() {
-            let _ = std::fs::copy(&src, &icon);
-        }
-    }
+    // 通知/开始菜单使用应用图标（AppIcon 生成的 ico），
+    // 避免 Toast 显示 Tauri 默认的双环图标。
+    let icon = data_dir.join("app.ico");
+    let _ = std::fs::write(&icon, include_bytes!("../icons/icon.ico"));
 
     // 注册表 AUMID
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);

@@ -214,7 +214,13 @@ mod dpapi {
 #[cfg(not(windows))]
 mod dpapi {
     pub fn protect(plain: &str) -> Option<Vec<u8>> {
-        Some(plain.as_bytes().to_vec())
+        // 与 Windows 端保持一致：按 UTF-16 LE 编码后存储，
+        // 解密逻辑（decrypt_password）才能正确还原。
+        let mut bytes = Vec::with_capacity(plain.len() * 2);
+        for u in plain.encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        Some(bytes)
     }
 
     pub fn unprotect(blob: &[u8]) -> Option<Vec<u8>> {

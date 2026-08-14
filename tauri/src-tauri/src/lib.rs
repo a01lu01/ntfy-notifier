@@ -102,6 +102,11 @@ fn is_mobile() -> bool {
     cfg!(mobile)
 }
 
+#[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
 #[cfg(desktop)]
 fn show_main(app: &AppHandle, page: &str) {
     if let Some(win) = app.get_webview_window("main") {
@@ -235,7 +240,8 @@ pub fn run() {
             save_ui_state,
             get_rules,
             save_rules,
-            is_mobile
+            is_mobile,
+            app_version
         ])
         .setup(|app| {
             #[cfg(mobile)]

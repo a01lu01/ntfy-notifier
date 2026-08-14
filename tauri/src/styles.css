@@ -34,6 +34,30 @@ html[data-theme="dark"] {
   --danger: #ff99a0;
 }
 
+/* 移动端安全区与触控适配（仅 Android 标记生效，Windows 完全不受影响） */
+html[data-mobile="true"] body {
+  overscroll-behavior: none;
+}
+
+html[data-mobile="true"] #app {
+  height: 100dvh;
+}
+
+html[data-mobile="true"] #content {
+  padding-top: calc(16px + env(safe-area-inset-top));
+  padding-left: 16px;
+  padding-right: 16px;
+  padding-bottom: calc(84px + env(safe-area-inset-bottom));
+}
+
+html[data-mobile="true"] #sidebar {
+  padding-bottom: calc(4px + env(safe-area-inset-bottom));
+}
+
+html[data-mobile="true"] .nav-item {
+  min-height: 46px;
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 button, input, select, textarea { font-family: inherit; }
@@ -116,6 +140,29 @@ html, body {
 }
 
 .field input:focus { border-color: var(--accent); }
+
+.password-wrap { position: relative; }
+
+.password-wrap input {
+  padding-right: 54px;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: var(--accent-text);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.password-toggle:hover { background: var(--hover); }
 
 .field select {
   width: 100%;

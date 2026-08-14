@@ -14,6 +14,7 @@ import {
   ruleSummary,
   validateRule
 } from "./rules-model.js";
+import { aboutContent } from "./about-model.js";
 
 const PAGES = [
   { id: "push", label: "推送" },
@@ -28,6 +29,8 @@ let uiState = null;
 let pushTable = null;
 let rules = [];
 let editingId = null;
+let isMobile = false;
+let appVersion = "1.1.0";
 
 const COLUMNS = [
   { id: "time", title: "时间" },
@@ -464,7 +467,13 @@ function buildSettingsPage() {
       <div class="field"><label>服务器地址</label><input type="text" id="set-server" placeholder="https://..."></div>
       <div class="row">
         <div class="field"><label>用户名</label><input type="text" id="set-username"></div>
-        <div class="field"><label>密码</label><input type="password" id="set-password"></div>
+        <div class="field">
+          <label>密码</label>
+          <div class="password-wrap">
+            <input type="password" id="set-password" autocomplete="off">
+            <button type="button" class="password-toggle" id="toggle-password">显示</button>
+          </div>
+        </div>
       </div>
       <div class="field"><label>主题</label><input type="text" id="set-topic" placeholder="your-topic"></div>
     </div>
@@ -499,6 +508,12 @@ function buildSettingsPage() {
     </div>
   `;
   el("btn-cancel").addEventListener("click", fillSettings);
+  el("toggle-password").addEventListener("click", () => {
+    const input = el("set-password");
+    const show = input.type === "password";
+    input.type = show ? "text" : "password";
+    el("toggle-password").textContent = show ? "隐藏" : "显示";
+  });
   el("btn-save").addEventListener("click", async () => {
     const themeMode = el("set-theme").dataset.value || "system";
     const next = {
@@ -536,11 +551,12 @@ function buildSettingsPage() {
 
 function buildAboutPage() {
   const page = el("page-about");
+  const about = aboutContent(isMobile, appVersion);
   page.innerHTML = `
     <div class="page-title">ntfy-Notifier</div>
-    <div class="page-subtitle">版本 1.0.0（Rust/Tauri）</div>
+    <div class="page-subtitle">${escapeHtml(about.version)}</div>
     <div class="card">
-      <p>Windows 系统托盘工具，订阅 ntfy 消息并弹出系统通知。</p>
+      <p>${escapeHtml(about.blurb)}</p>
       <p style="margin-top:8px"><a href="https://github.com/a01lu01/ntfy-notifier" target="_blank">https://github.com/a01lu01/ntfy-notifier</a></p>
     </div>
   `;
@@ -551,6 +567,9 @@ function buildAboutPage() {
 async function init() {
   config = await invoke("get_config");
   uiState = await invoke("get_ui_state");
+  isMobile = await invoke("is_mobile");
+  appVersion = await invoke("app_version");
+  document.documentElement.dataset.mobile = isMobile ? "true" : "false";
   applyTheme();
   buildNav();
   buildPushPage();
