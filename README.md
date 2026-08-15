@@ -27,7 +27,7 @@ Windows 系统托盘 / Android 常驻通知工具，订阅 ntfy 消息并弹出�
 <https://github.com/a01lu01/ntfy-notifier/releases>
 
 - `ntfy-notifier.exe`：便携版，直接运行
-- `ntfy-Notifier_1.1.6_x64-setup.exe`：NSIS 安装包
+- `ntfy-Notifier_1.1.7_x64-setup.exe`：NSIS 安装包
 
 ## 开发环境
 
@@ -45,7 +45,7 @@ Windows 系统托盘 / Android 常驻通知工具，订阅 ntfy 消息并弹出�
 rustup target add aarch64-linux-android x86_64-linux-android
 ```
 
-- 首次运行 `npx tauri android init` 生成 `src-tauri/gen/android/`（已提交到仓库）
+- `src-tauri/gen/android/` 已提交并包含定制 Kotlin 通知服务；不要重新运行 `tauri android init` 覆盖它
 - Windows 下需要开启"开发者模式"（Tauri CLI 需创建符号链接）
 - 构建/联网受限时，可为 Gradle 配置代理（写入 `%USERPROFILE%\.gradle\gradle.properties`）：
 
@@ -74,7 +74,7 @@ npm run tauri build
 产物：
 
 - 便携版：`tauri/src-tauri/target/release/ntfy-notifier.exe`
-- 安装包：`tauri/src-tauri/target/release/bundle/nsis/ntfy-Notifier_1.1.6_x64-setup.exe`
+- 安装包：`tauri/src-tauri/target/release/bundle/nsis/ntfy-Notifier_1.1.7_x64-setup.exe`
 
 ## Android 构建
 
@@ -88,8 +88,11 @@ cd tauri
 
 产物：
 
-- APK：`tauri/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`
-- AAB：`tauri/src-tauri/gen/android/app/build/outputs/bundle/universalDebug/app-universal-debug.aab`
+- 调试 APK：`tauri/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`
+- 发布 APK：`tauri/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk`
+- 发布 AAB：`tauri/src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab`
+
+通知小图标的替换、干净构建与 APK 成品检查见 [`docs/android-notification-icons.md`](docs/android-notification-icons.md)。
 
 在真机上安装调试：
 
@@ -159,6 +162,7 @@ ntfy-notifier/
 │   │   └── tauri.conf.json   # 窗口与打包配置
 │   └── package.json
 ├── docs/
+│   ├── android-notification-icons.md # Android 通知图标与干净打包指南
 │   └── ui-design.md          # 界面设计规格（字体/颜色/尺寸）
 └── README.md
 ```
