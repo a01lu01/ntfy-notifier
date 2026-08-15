@@ -47,7 +47,10 @@ pub fn extract_after_keyword(
     }
     hits.sort_unstable();
     for (_, end) in hits {
-        let to = std::cmp::min(end + window, text.len());
+        let to = text[end..]
+            .char_indices()
+            .nth(window)
+            .map_or(text.len(), |(offset, _)| end + offset);
         if let Some(otp) = extract_digit_run(&text[end..to], min_len, max_len) {
             return Some(otp);
         }
@@ -69,7 +72,10 @@ mod tests {
 
     #[test]
     fn digit_run_matches_embedded_run() {
-        assert_eq!(extract_digit_run("abc1234xyz", 4, 8).as_deref(), Some("1234"));
+        assert_eq!(
+            extract_digit_run("abc1234xyz", 4, 8).as_deref(),
+            Some("1234")
+        );
     }
 
     #[test]
@@ -84,7 +90,10 @@ mod tests {
 
     #[test]
     fn digit_run_honors_fixed_length() {
-        assert_eq!(extract_digit_run("验证码123456", 6, 6).as_deref(), Some("123456"));
+        assert_eq!(
+            extract_digit_run("验证码123456", 6, 6).as_deref(),
+            Some("123456")
+        );
     }
 
     #[test]
@@ -115,10 +124,26 @@ mod tests {
     #[test]
     fn after_keyword_honors_window() {
         let text = format!("验证码{}123456", "x".repeat(33));
-        assert_eq!(extract_after_keyword(&text, &["验证码".to_string()], 4, 8, 30), None);
+        assert_eq!(
+            extract_after_keyword(&text, &["验证码".to_string()], 4, 8, 30),
+            None
+        );
         assert_eq!(
             extract_after_keyword(&text, &["验证码".to_string()], 4, 8, 40).as_deref(),
             Some("123456")
+        );
+    }
+
+    #[test]
+    fn after_keyword_counts_unicode_characters_without_panicking() {
+        let text = format!("验证码{}123456", "中".repeat(29));
+        assert_eq!(
+            extract_after_keyword(&text, &["验证码".to_string()], 4, 8, 35).as_deref(),
+            Some("123456")
+        );
+        assert_eq!(
+            extract_after_keyword(&text, &["验证码".to_string()], 4, 8, 29),
+            None
         );
     }
 
@@ -139,7 +164,10 @@ mod tests {
 
     #[test]
     fn after_keyword_no_keyword() {
-        assert_eq!(extract_after_keyword("123456", &["验证码".to_string()], 4, 8, 30), None);
+        assert_eq!(
+            extract_after_keyword("123456", &["验证码".to_string()], 4, 8, 30),
+            None
+        );
     }
 
     #[test]

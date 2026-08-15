@@ -160,41 +160,38 @@ async fn handle_line(line: &[u8], app: &AppHandle, cfg: &Config) {
         .unwrap_or(data)
         .to_string();
 
-    match history::record_message(&id, &topic, &title, &message) {
-        Ok(true) => {
-            #[cfg(target_os = "windows")]
-            {
-                if cfg.auto_copy_otp {
-                    let rule_list = rules::load();
-                    if let Some(otp) = rules::find_otp(&message, &rule_list) {
-                        let app2 = app.clone();
-                        tauri::async_runtime::spawn_blocking(move || {
-                            if let Err(e) = clipboard::copy_text(&otp) {
-                                eprintln!("[ntfy] 验证码复制失败：{e}");
-                            }
-                            let _ = app2.emit("history-updated", ());
-                        });
-                    }
-                }
-                notify::show(&title, &message, "ntfy-Notifier");
-            }
-
-            #[cfg(mobile)]
-            {
-                let otp = rules::find_otp(&message, &rules::load());
-                notify_mobile::update_notifications(app, &title, &message, otp.as_deref());
-                if cfg.auto_copy_otp {
-                    if let Some(otp) = otp {
-                        let app2 = app.clone();
-                        tauri::async_runtime::spawn_blocking(move || {
-                            notify_mobile::copy_to_clipboard(&app2, &otp);
-                        });
-                    }
+    if let Ok(true) = history::record_message(&id, &topic, &title, &message) {
+        #[cfg(target_os = "windows")]
+        {
+            if cfg.auto_copy_otp {
+                let rule_list = rules::load();
+                if let Some(otp) = rules::find_otp(&message, &rule_list) {
+                    let app2 = app.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        if let Err(e) = clipboard::copy_text(&otp) {
+                            eprintln!("[ntfy] 验证码复制失败：{e}");
+                        }
+                        let _ = app2.emit("history-updated", ());
+                    });
                 }
             }
-
-            let _ = app.emit("history-updated", ());
+            notify::show(&title, &message, "ntfy-Notifier");
         }
-        _ => {}
+
+        #[cfg(mobile)]
+        {
+            let otp = rules::find_otp(&message, &rules::load());
+            notify_mobile::update_notifications(app, &title, &message, otp.as_deref());
+            if cfg.auto_copy_otp {
+                if let Some(otp) = otp {
+                    let app2 = app.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        notify_mobile::copy_to_clipboard(&app2, &otp);
+                    });
+                }
+            }
+        }
+
+        let _ = app.emit("history-updated", ());
     }
 }

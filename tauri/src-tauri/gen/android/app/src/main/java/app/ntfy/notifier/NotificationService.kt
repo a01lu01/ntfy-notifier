@@ -9,11 +9,11 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.IBinder
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.app.Person
 import androidx.core.app.ServiceCompat
 import com.why.ntfy_notifier.MainActivity
 import com.why.ntfy_notifier.R
@@ -113,7 +113,6 @@ class NotificationService : Service() {
   private fun refreshLatest() {
     val builder = NotificationCompat.Builder(this, CHANNEL_LATEST)
       .setSmallIcon(R.drawable.ic_stat_ntfy)
-      .setLargeIcon(BitmapFactory.decodeResource(resources, R.drawable.ic_notification_large))
       .setContentTitle("ntfy-Notifier 运行中")
       .setContentText(
         if (latestTitle == "ntfy-Notifier" && latestMessage == "等待推送…") {
@@ -130,7 +129,7 @@ class NotificationService : Service() {
       builder.addAction(0, "复制验证码", copyOtpIntent(otp))
     }
     val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-      ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+      ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
     } else {
       0
     }
@@ -138,11 +137,18 @@ class NotificationService : Service() {
   }
 
   private fun postAlert(title: String, message: String, otp: String?) {
-    val style = NotificationCompat.MessagingStyle("ntfy")
-    style.addMessage(message, System.currentTimeMillis(), title)
+    val user = Person.Builder().setName("ntfy").build()
+    val sender = Person.Builder().setName(title).build()
+    val style = NotificationCompat.MessagingStyle(user)
+      .addMessage(
+        NotificationCompat.MessagingStyle.Message(
+          message,
+          System.currentTimeMillis(),
+          sender
+        )
+      )
     val builder = NotificationCompat.Builder(this, CHANNEL_ALERTS)
       .setSmallIcon(R.drawable.ic_stat_ntfy)
-      .setLargeIcon(BitmapFactory.decodeResource(resources, R.drawable.ic_notification_large))
       .setContentTitle(title)
       .setContentText(message)
       .setAutoCancel(true)

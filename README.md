@@ -27,7 +27,7 @@ Windows 系统托盘 / Android 常驻通知工具，订阅 ntfy 消息并弹出�
 <https://github.com/a01lu01/ntfy-notifier/releases>
 
 - `ntfy-notifier.exe`：便携版，直接运行
-- `ntfy-Notifier_1.1.7_x64-setup.exe`：NSIS 安装包
+- `ntfy-Notifier_1.1.8_x64-setup.exe`：NSIS 安装包
 
 ## 开发环境
 
@@ -74,7 +74,7 @@ npm run tauri build
 产物：
 
 - 便携版：`tauri/src-tauri/target/release/ntfy-notifier.exe`
-- 安装包：`tauri/src-tauri/target/release/bundle/nsis/ntfy-Notifier_1.1.7_x64-setup.exe`
+- 安装包：`tauri/src-tauri/target/release/bundle/nsis/ntfy-Notifier_1.1.8_x64-setup.exe`
 
 ## Android 构建
 
@@ -103,6 +103,8 @@ cd tauri
 Android 端说明：
 
 - 首次启动会请求通知权限；随后启动前台服务，通知栏常驻"最新推送"（不可滑掉），每条新消息额外弹出高优先级提醒。
+- 通知仅使用左侧小图标，不设置会占用通知右侧空间的大图标。
+- Android 14+ 使用声明了具体用途的 `specialUse` 前台服务，避免 Android 15+ 对 `dataSync` 类型施加的 6 小时运行上限；如上架 Google Play，需在 Play Console 申报此前台服务用途。
 - 验证码由"规则"页匹配：命中时通知上出现"复制验证码"按钮，开启"自动复制验证码"（设置页）时自动写入剪贴板，配合输入法剪贴板栏实现一键输入。
 - 数据目录为应用私有目录（`app.path().app_data_dir()`），包含 `config.json`、`history.db`、`ui_state.json`、`rules.json`。
 - Android 端"开机自启"由 Boot 广播接收器实现（需系统允许自启动）。

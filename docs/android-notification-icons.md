@@ -10,7 +10,7 @@ Android 应用中容易混淆的图标有三类：
 | --- | --- | --- |
 | 应用启动图标 | `mipmap-*/ic_launcher*` | 桌面、应用详情页，以及部分系统的通知应用徽标 |
 | 通知小图标 | `drawable-*/ic_stat_ntfy.png` | 顶部状态栏和通知卡片左侧的小图标 |
-| 通知大图标 | `drawable-*/ic_notification_large.png` | 通知展开后由系统决定是否显示的彩色图标 |
+| 通知大图标 | 当前不设置 | 设置后通常占用通知右侧的大块空间 |
 
 `tauri icon AppIcon.png` 主要生成应用启动图标，不会自动生成符合 Android 规范的通知小图标。
 
@@ -24,14 +24,13 @@ Android 通知由原生 Kotlin 前台服务创建，不是由 `tauri.conf.json` 
 tauri/src-tauri/gen/android/app/src/main/java/app/ntfy/notifier/NotificationService.kt
 ```
 
-常驻通知和新消息提醒都必须显式设置小图标和大图标：
+常驻通知和新消息提醒都必须显式设置小图标：
 
 ```kotlin
 .setSmallIcon(R.drawable.ic_stat_ntfy)
-.setLargeIcon(
-  BitmapFactory.decodeResource(resources, R.drawable.ic_notification_large)
-)
 ```
+
+1.1.8 起不再调用 `setLargeIcon()`，因此通知只保留系统显示的左侧小图标。如果重新添加 `setLargeIcon()`，部分系统会像截图中那样在通知右侧再显示一个大图标。
 
 如果修改了资源名称，例如改成 `ic_stat_my_logo.png`，代码也必须同步改为：
 
@@ -45,13 +44,13 @@ tauri/src-tauri/gen/android/app/src/main/java/app/ntfy/notifier/NotificationServ
 
 当前通知小图标尺寸如下：
 
-| 目录 | `ic_stat_ntfy.png` | `ic_notification_large.png` |
-| --- | ---: | ---: |
-| `drawable-mdpi` | 24 × 24 | 64 × 64 |
-| `drawable-hdpi` | 36 × 36 | 96 × 96 |
-| `drawable-xhdpi` | 48 × 48 | 128 × 128 |
-| `drawable-xxhdpi` | 72 × 72 | 192 × 192 |
-| `drawable-xxxhdpi` | 96 × 96 | 256 × 256 |
+| 目录 | `ic_stat_ntfy.png` |
+| --- | ---: |
+| `drawable-mdpi` | 24 × 24 |
+| `drawable-hdpi` | 36 × 36 |
+| `drawable-xhdpi` | 48 × 48 |
+| `drawable-xxhdpi` | 72 × 72 |
+| `drawable-xxxhdpi` | 96 × 96 |
 
 需要同时替换五个密度目录中的同名文件：
 
@@ -127,14 +126,13 @@ tauri/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-
 & "$env:LOCALAPPDATA\Android\Sdk\build-tools\36.0.0\aapt2.exe" `
   dump resources `
   "src-tauri\gen\android\app\build\outputs\apk\universal\release\app-universal-release.apk" |
-  Select-String "ic_stat_ntfy|ic_notification_large"
+  Select-String "ic_stat_ntfy"
 ```
 
-输出中应同时包含：
+输出中应包含：
 
 ```text
 drawable/ic_stat_ntfy
-drawable/ic_notification_large
 ```
 
 如需进一步确认 Kotlin 字节码引用，可用 Android SDK 的 `apkanalyzer` 反编译 `app.ntfy.notifier.NotificationService`，检查两处 `setSmallIcon()` 传入的资源 ID 是否与 `drawable/ic_stat_ntfy` 的资源 ID 一致。
@@ -147,7 +145,7 @@ drawable/ic_notification_large
 
 ### 为什么不能直接把彩色 Logo 用作通知小图标？
 
-Android 会把通知小图标作为遮罩并由系统着色。彩色 Logo 应放在 `ic_notification_large`；小图标应使用适合 24 dp 显示的单色轮廓。
+Android 会把通知小图标作为遮罩并由系统着色，小图标应使用适合 24 dp 显示的单色轮廓。如果确实需要彩色 Logo，可以重新增加通知大图标，但它会占用通知布局中的额外空间。
 
 ### 修改 `tauri.conf.json` 的 `bundle.icon` 有用吗？
 
