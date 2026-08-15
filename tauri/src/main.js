@@ -30,7 +30,7 @@ let pushTable = null;
 let rules = [];
 let editingId = null;
 let isMobile = false;
-let appVersion = "1.1.8";
+let appVersion = "1.1.9";
 
 const COLUMNS = [
   { id: "time", title: "时间" },

@@ -51,6 +51,7 @@ html[data-mobile="true"] #content {
 }
 
 html[data-mobile="true"] #sidebar {
+  padding-top: calc(8px + env(safe-area-inset-top));
   padding-bottom: calc(4px + env(safe-area-inset-bottom));
 }
 
@@ -405,6 +406,11 @@ tr:hover td { background: var(--hover); }
     padding: 4px 8px;
     z-index: 10;
     background: var(--window-bg);
+  }
+
+  html[data-mobile="true"] #sidebar {
+    padding-top: 4px;
+    padding-bottom: calc(4px + env(safe-area-inset-bottom));
   }
 
   #nav {

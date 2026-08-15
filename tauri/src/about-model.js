@@ -1,4 +1,4 @@
-export function aboutContent(isMobile, version = "1.1.8") {
+export function aboutContent(isMobile, version = "1.1.9") {
   if (isMobile) {
     return {
       blurb: "Android 常驻通知工具，订阅 ntfy 消息并弹出系统通知。",

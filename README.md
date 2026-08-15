@@ -27,7 +27,7 @@ Windows 系统托盘 / Android 常驻通知工具，订阅 ntfy 消息并弹出�
 <https://github.com/a01lu01/ntfy-notifier/releases>
 
 - `ntfy-notifier.exe`：便携版，直接运行
-- `ntfy-Notifier_1.1.8_x64-setup.exe`：NSIS 安装包
+- `ntfy-Notifier_1.1.9_x64-setup.exe`：NSIS 安装包
 
 ## 开发环境
 
@@ -74,7 +74,7 @@ npm run tauri build
 产物：
 
 - 便携版：`tauri/src-tauri/target/release/ntfy-notifier.exe`
-- 安装包：`tauri/src-tauri/target/release/bundle/nsis/ntfy-Notifier_1.1.8_x64-setup.exe`
+- 安装包：`tauri/src-tauri/target/release/bundle/nsis/ntfy-Notifier_1.1.9_x64-setup.exe`
 
 ## Android 构建
 
