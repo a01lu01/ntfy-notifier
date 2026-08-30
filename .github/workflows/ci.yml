@@ -94,11 +94,15 @@ jobs:
         with:
           persist-credentials: false
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
+        run: >-
+          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
+          --component clippy
       - name: Select pinned Rust toolchain
         run: rustup default ${{ env.RUST_TOOLCHAIN }}
       - name: Compile and test Windows backend
         run: cargo test --all-features --locked
+      - name: Run strict Windows Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
   android:
     name: Android lint, debug compile and API 24 tests

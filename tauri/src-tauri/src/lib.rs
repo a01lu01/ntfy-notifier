@@ -148,10 +148,18 @@ fn save_config(
     *cached = Some(Ok(stored_config.clone()));
     #[cfg(target_os = "windows")]
     {
-        let exe = std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let _ = startup::set_auto_start(stored_config.auto_start, &exe);
+        match std::env::current_exe() {
+            Ok(exe) => {
+                if let Err(error) = startup::set_auto_start(stored_config.auto_start, &exe) {
+                    eprintln!("Windows auto-start update failed after saving config: {error}");
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "cannot resolve the application executable for the auto-start update: {error}"
+                );
+            }
+        }
     }
     #[cfg(mobile)]
     {
@@ -346,12 +354,20 @@ pub fn run() {
 
             #[cfg(target_os = "windows")]
             {
-                let exe = std::env::current_exe()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
-                let _ = startup::register_aumid(&exe);
-                if cfg.as_ref().is_some_and(|cfg| cfg.auto_start) {
-                    let _ = startup::set_auto_start(true, &exe);
+                match std::env::current_exe() {
+                    Ok(exe) => {
+                        if let Err(error) = startup::register_aumid(&exe) {
+                            eprintln!("Windows AppUserModelID registration failed: {error}");
+                        }
+                        if cfg.as_ref().is_some_and(|cfg| cfg.auto_start) {
+                            if let Err(error) = startup::set_auto_start(true, &exe) {
+                                eprintln!("Windows auto-start repair failed: {error}");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("cannot resolve the application executable: {error}");
+                    }
                 }
             }
 
