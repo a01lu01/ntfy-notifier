@@ -141,20 +141,33 @@ private fun hasSubscriberForegroundNotification(context: Context): Boolean {
   }
 }
 
-internal fun launchAndFinishMainActivity(): Activity {
+internal fun launchAndBackgroundMainActivity(
+  activityProbe: MainActivityProbe,
+  expectedResumeCount: Int,
+  expectedStopCount: Int
+) {
   val instrumentation = InstrumentationRegistry.getInstrumentation()
   val context = instrumentation.targetContext
-  val activity = instrumentation.startActivitySync(
+  context.startActivity(
     Intent(context, MainActivity::class.java)
       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
   )
-  instrumentation.waitForIdleSync()
-  instrumentation.runOnMainSync { activity.finish() }
-  instrumentation.waitForIdleSync()
-  waitUntil(10_000, "MainActivity did not finish") {
-    activity.isDestroyed
+  waitUntil(10_000, "MainActivity did not resume") {
+    activityProbe.resumptions >= expectedResumeCount && activityProbe.resumedActivity != null
   }
-  return activity
+  instrumentation.waitForIdleSync()
+
+  val activity = activityProbe.resumedActivity
+    ?: throw AssertionError("MainActivity resumed without an observable Activity instance")
+  val movedToBackground = AtomicBoolean(false)
+  instrumentation.runOnMainSync {
+    movedToBackground.set(activity.moveTaskToBack(true))
+  }
+  assertTrue("MainActivity task did not move to the background", movedToBackground.get())
+  instrumentation.waitForIdleSync()
+  waitUntil(10_000, "MainActivity did not stop after moving to the background") {
+    activityProbe.stops >= expectedStopCount
+  }
 }
 
 internal class MainActivityProbe(context: Context) :
@@ -162,8 +175,14 @@ internal class MainActivityProbe(context: Context) :
   Closeable {
   private val application = context.applicationContext as Application
   private val createdCount = AtomicInteger(0)
+  private val resumedCount = AtomicInteger(0)
+  private val stoppedCount = AtomicInteger(0)
+  private val currentResumedActivity = AtomicReference<Activity?>(null)
 
   val creations: Int get() = createdCount.get()
+  val resumptions: Int get() = resumedCount.get()
+  val stops: Int get() = stoppedCount.get()
+  val resumedActivity: Activity? get() = currentResumedActivity.get()
 
   init {
     application.registerActivityLifecycleCallbacks(this)
@@ -175,11 +194,21 @@ internal class MainActivityProbe(context: Context) :
 
   override fun onActivityStarted(activity: Activity) = Unit
 
-  override fun onActivityResumed(activity: Activity) = Unit
+  override fun onActivityResumed(activity: Activity) {
+    if (activity is MainActivity) {
+      currentResumedActivity.set(activity)
+      resumedCount.incrementAndGet()
+    }
+  }
 
   override fun onActivityPaused(activity: Activity) = Unit
 
-  override fun onActivityStopped(activity: Activity) = Unit
+  override fun onActivityStopped(activity: Activity) {
+    if (activity is MainActivity) {
+      currentResumedActivity.compareAndSet(activity, null)
+      stoppedCount.incrementAndGet()
+    }
+  }
 
   override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 

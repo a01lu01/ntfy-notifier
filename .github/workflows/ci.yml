@@ -223,6 +223,15 @@ jobs:
         run: >-
           ./gradlew --no-daemon --stacktrace connectedUniversalDebugAndroidTest
           -Pandroid.testInstrumentationRunnerArguments.ntfySubscriberIntegration=true
+          -Pandroid.testInstrumentationRunnerArguments.notClass=app.ntfy.notifier.SubscriberBootRecoveryInstrumentationTest#enabledBootPersistsAndRepeatedBootReconfigureAndActivityDoNotDuplicateSse
+          -x rustBuildUniversalDebug -x rustBuildArm64Debug -x rustBuildArmDebug
+          -x rustBuildX86Debug -x rustBuildX86_64Debug
+      - name: Run isolated API 24 Tauri lifecycle test
+        run: >-
+          ./gradlew --no-daemon --stacktrace connectedUniversalDebugAndroidTest
+          -Pandroid.testInstrumentationRunnerArguments.ntfySubscriberIntegration=true
+          -Pandroid.testInstrumentationRunnerArguments.preserveTauriActivity=true
+          -Pandroid.testInstrumentationRunnerArguments.class=app.ntfy.notifier.SubscriberBootRecoveryInstrumentationTest#enabledBootPersistsAndRepeatedBootReconfigureAndActivityDoNotDuplicateSse
           -x rustBuildUniversalDebug -x rustBuildArm64Debug -x rustBuildArmDebug
           -x rustBuildX86Debug -x rustBuildX86_64Debug
       - name: Show emulator diagnostics after failure

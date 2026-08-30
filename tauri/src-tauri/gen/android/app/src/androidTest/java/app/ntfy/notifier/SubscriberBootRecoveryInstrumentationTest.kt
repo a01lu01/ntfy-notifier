@@ -91,14 +91,25 @@ class SubscriberBootRecoveryInstrumentationTest {
       repeat(3) {
         NotificationService.sendAction(context, NotificationService.ACTION_RECONFIGURE)
       }
-      repeat(2) { launchAndFinishMainActivity() }
+      // The instrumentation runner shares the Tauri host process. Destroying its last Wry
+      // Activity intentionally terminates that process, so exercise the user-visible
+      // foreground/background cycle instead. MainActivity is singleTask and must be reused.
+      repeat(2) { index ->
+        launchAndBackgroundMainActivity(
+          activityProbe,
+          expectedResumeCount = index + 1,
+          expectedStopCount = index + 1
+        )
+      }
 
       // Give BootReceiver's serial executor and Tauri setup enough time to issue their idempotent
       // control actions before checking the steady state.
       SystemClock.sleep(3_000)
       server.assertHealthy()
 
-      assertEquals("only the two deliberate Activity launches are allowed", 2, activityProbe.creations)
+      assertEquals("singleTask must reuse the deliberate Activity launch", 1, activityProbe.creations)
+      assertEquals("both deliberate Activity launches must resume", 2, activityProbe.resumptions)
+      assertEquals("both deliberate Activity launches must return to background", 2, activityProbe.stops)
       assertEquals("repeated controls must keep the original SSE", 1, server.acceptedCount)
       assertEquals("no control path may overlap SSE connections", 1, server.maximumActive)
       assertEquals("/$topic/sse", server.requestPaths.single())
