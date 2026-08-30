@@ -23,7 +23,8 @@ use std::collections::HashMap;
 #[cfg(desktop)]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(desktop)]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 #[cfg(desktop)]
 use std::time::{Duration, Instant};
 #[cfg(desktop)]
@@ -36,11 +37,17 @@ use tauri::{AppHandle, Manager};
 
 pub struct AppState {
     pub ntfy: ntfy::NtfyManager,
+    config: Mutex<Option<Result<config::Config, String>>>,
 }
 
 #[tauri::command]
-fn get_config() -> config::Config {
-    config::load_config().0
+fn get_config(state: tauri::State<'_, AppState>) -> Result<config::Config, String> {
+    state
+        .config
+        .lock()
+        .map_err(|_| "配置状态锁已损坏".to_string())?
+        .clone()
+        .unwrap_or_else(|| Err("配置尚未初始化".to_string()))
 }
 
 #[tauri::command]
@@ -56,7 +63,15 @@ fn save_config(
         &config.password,
         config.allow_insecure_http,
     )?;
+    let state = state.inner();
+    // Hold the same operation lock through persistence, platform side effects, and restart so
+    // concurrent saves cannot leave the subscriber running an older configuration than disk.
+    let mut cached = state
+        .config
+        .lock()
+        .map_err(|_| "配置状态锁已损坏".to_string())?;
     config::save_config(&config)?;
+    *cached = Some(Ok(config.clone()));
     #[cfg(target_os = "windows")]
     {
         let exe = std::env::current_exe()
@@ -69,6 +84,7 @@ fn save_config(
         notify_mobile::set_auto_start(&app, config.auto_start);
     }
     state.ntfy.restart(config.clone(), app);
+    drop(cached);
     Ok(config)
 }
 
@@ -211,6 +227,7 @@ pub fn run() {
     builder
         .manage(AppState {
             ntfy: ntfy::NtfyManager::new(),
+            config: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -233,7 +250,22 @@ pub fn run() {
             }
 
             let handle = app.handle().clone();
-            let cfg = config::load_config().0;
+            let loaded_config = config::load_config();
+            {
+                let state = app.state::<AppState>();
+                let mut cached = state
+                    .config
+                    .lock()
+                    .map_err(|_| std::io::Error::other("configuration state lock poisoned"))?;
+                *cached = Some(loaded_config.clone());
+            }
+            let cfg = match loaded_config {
+                Ok(cfg) => Some(cfg),
+                Err(error) => {
+                    eprintln!("configuration load failed; subscriber remains stopped: {error}");
+                    None
+                }
+            };
 
             #[cfg(target_os = "windows")]
             {
@@ -241,7 +273,7 @@ pub fn run() {
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
                 let _ = startup::register_aumid(&exe);
-                if cfg.auto_start {
+                if cfg.as_ref().is_some_and(|cfg| cfg.auto_start) {
                     let _ = startup::set_auto_start(true, &exe);
                 }
             }
@@ -288,12 +320,16 @@ pub fn run() {
 
             #[cfg(mobile)]
             {
-                notify_mobile::start_service(&handle);
-                notify_mobile::set_auto_start(&handle, cfg.auto_start);
+                if let Some(cfg) = cfg.as_ref() {
+                    notify_mobile::start_service(&handle);
+                    notify_mobile::set_auto_start(&handle, cfg.auto_start);
+                }
             }
 
-            let state = app.state::<AppState>();
-            state.ntfy.restart(cfg, handle);
+            if let Some(cfg) = cfg {
+                let state = app.state::<AppState>();
+                state.ntfy.restart(cfg, handle);
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

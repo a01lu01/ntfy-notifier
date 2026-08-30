@@ -17,7 +17,9 @@ import {
 } from "./rules-model.js";
 import { aboutContent, PROJECT_URL } from "./about-model.js";
 import {
+  createDefaultConfig,
   getInsecureHttpSaveAction,
+  requiresConfigOverwriteConfirmation,
   resolveTheme,
   restoreSettingsState
 } from "./settings-model.js";
@@ -37,6 +39,7 @@ let rules = [];
 let editingId = null;
 let isMobile = false;
 let appVersion = "";
+let configLoadFailed = false;
 
 const COLUMNS = [
   { id: "time", title: "时间" },
@@ -573,8 +576,15 @@ function buildSettingsPage() {
         "确认使用不安全 HTTP"
       ))) return;
     }
+    if (requiresConfigOverwriteConfirmation(configLoadFailed)) {
+      if (!(await confirmBox(
+        "当前磁盘配置无法读取。继续保存会覆盖已保留的原配置，并以当前表单内容（包括密码）作为新配置。确定要覆盖吗？",
+        "确认覆盖原配置"
+      ))) return;
+    }
     try {
       config = await invoke("save_config", { config: next });
+      configLoadFailed = false;
       applyTheme();
     } catch (error) {
       await alertBox(`保存失败：${String(error)}`, "无法保存设置");
@@ -619,7 +629,14 @@ function buildAboutPage() {
 /* ---------- 初始化 ---------- */
 
 async function init() {
-  config = await invoke("get_config");
+  let configLoadError = null;
+  try {
+    config = await invoke("get_config");
+  } catch (error) {
+    config = createDefaultConfig();
+    configLoadFailed = true;
+    configLoadError = error;
+  }
   uiState = await invoke("get_ui_state");
   isMobile = await invoke("is_mobile");
   appVersion = await invoke("app_version");
@@ -636,6 +653,13 @@ async function init() {
 
   await listen("navigate", (e) => switchPage(e.payload));
   await listen("history-updated", () => { if (currentPage === "push") refreshPush(); });
+
+  if (configLoadError != null) {
+    await alertBox(
+      `配置读取失败，原配置文件已保留且订阅未启动。请检查后重新保存设置：${String(configLoadError)}`,
+      "无法读取配置"
+    );
+  }
 }
 
 init().catch((e) => console.error(e));

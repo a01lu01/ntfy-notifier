@@ -3,6 +3,25 @@ export const HIDDEN_PASSWORD_STATE = Object.freeze({
   toggleLabel: "显示"
 });
 
+export const DEFAULT_CONFIG = Object.freeze({
+  server: "",
+  username: "",
+  password: "",
+  topic: "",
+  theme_mode: "system",
+  auto_start: false,
+  auto_copy_otp: false,
+  allow_insecure_http: false
+});
+
+export function createDefaultConfig() {
+  return { ...DEFAULT_CONFIG };
+}
+
+export function requiresConfigOverwriteConfirmation(configLoadFailed) {
+  return configLoadFailed === true;
+}
+
 export function createSettingsDraft(config = {}) {
   return {
     server: config.server || "",

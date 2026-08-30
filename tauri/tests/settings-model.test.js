@@ -2,10 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  DEFAULT_CONFIG,
   HIDDEN_PASSWORD_STATE,
+  createDefaultConfig,
   createSettingsDraft,
   getInsecureHttpSaveAction,
   isRemoteInsecureHttp,
+  requiresConfigOverwriteConfirmation,
   resolveTheme,
   restoreSettingsState
 } from "../src/settings-model.js";
@@ -20,6 +23,28 @@ const savedConfig = {
   auto_start: true,
   auto_copy_otp: false
 };
+
+test("fallback config keeps the backend's public eight-field shape", () => {
+  const fallback = createDefaultConfig();
+
+  assert.deepEqual(fallback, DEFAULT_CONFIG);
+  assert.deepEqual(Object.keys(fallback).sort(), [
+    "allow_insecure_http",
+    "auto_copy_otp",
+    "auto_start",
+    "password",
+    "server",
+    "theme_mode",
+    "topic",
+    "username"
+  ]);
+  assert.notStrictEqual(fallback, DEFAULT_CONFIG);
+});
+
+test("a fallback config cannot overwrite the preserved file without confirmation", () => {
+  assert.equal(requiresConfigOverwriteConfirmation(true), true);
+  assert.equal(requiresConfigOverwriteConfirmation(false), false);
+});
 
 test("settings draft is recreated from saved config", () => {
   const first = createSettingsDraft(savedConfig);
