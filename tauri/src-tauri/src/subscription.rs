@@ -1,9 +1,9 @@
 use crate::config::Config;
 use crate::endpoint::{self, ValidatedEndpoint};
+use crate::sse::{DecodeOutcome, Decoder as SseDecoder, MAX_EVENT_BYTES};
 use futures_util::future::BoxFuture;
 use futures_util::{Stream, StreamExt};
-use serde::Serialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -12,6 +12,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+
+const MAX_NTFY_JSON_BYTES: usize = MAX_EVENT_BYTES;
+// ntfy enforces a 1 KiB title ceiling. The body cap is four times its default
+// 4 KiB message limit so common self-hosted and base64 UnifiedPush payloads
+// remain compatible while history growth stays bounded.
+pub(crate) const MAX_TITLE_BYTES: usize = 1024;
+pub(crate) const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SubscriptionConfig {
@@ -94,6 +101,25 @@ pub(crate) struct SubscriptionMessage {
     pub topic: String,
     pub title: String,
     pub message: String,
+}
+
+pub(crate) fn validate_persistable_message(
+    message: &SubscriptionMessage,
+) -> Result<(), &'static str> {
+    validate_persistable_text(&message.title, &message.message)
+}
+
+pub(crate) fn validate_persistable_text(title: &str, message: &str) -> Result<(), &'static str> {
+    if title.len() > MAX_TITLE_BYTES {
+        return Err("消息标题超过 1024 字节上限");
+    }
+    if message.len() > MAX_MESSAGE_BYTES {
+        return Err("消息正文超过 16384 字节上限");
+    }
+    if title.contains('\0') || message.contains('\0') {
+        return Err("消息标题或正文包含 NUL 字符");
+    }
+    Ok(())
 }
 
 pub(crate) trait SubscriptionSink: Send + Sync {
@@ -341,7 +367,7 @@ impl SubscriptionCore {
         key: &SubscriptionKey,
         context: &RunContext,
     ) -> bool {
-        let mut buffer = Vec::new();
+        let mut decoder = SseDecoder::new();
         let mut opened = false;
 
         loop {
@@ -362,35 +388,65 @@ impl SubscriptionCore {
                 }
             };
 
-            buffer.extend_from_slice(&chunk);
-            while let Some(position) = buffer.iter().position(|&byte| byte == b'\n') {
-                let line: Vec<u8> = buffer.drain(..=position).collect();
-                match parse_line(&line) {
-                    Some(IncomingEvent::Open) => {
-                        if !opened {
-                            opened = true;
-                            if !context.publish_state(SubscriptionState::Connected).await {
-                                return opened;
-                            }
-                        }
+            let mut input = chunk.as_slice();
+            while !input.is_empty() {
+                let Some(outcome) = decoder.next_event(&mut input) else {
+                    break;
+                };
+                match self
+                    .handle_decoded_event(outcome, key, context, &mut opened)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => return opened,
+                    Err(error) => {
+                        eprintln!("[ntfy] 消息处理失败：{error}");
+                        return opened;
                     }
-                    Some(IncomingEvent::Message(message)) => {
-                        match context.deliver_message(&*self.store, &self.commit_gate, key, message)
-                        {
-                            Ok(true) => {}
-                            Ok(false) => return opened,
-                            Err(error) => {
-                                eprintln!("[ntfy] 消息处理失败：{error}");
-                                return opened;
-                            }
-                        }
-                    }
-                    None => {}
                 }
             }
         }
 
+        if let Some(outcome) = decoder.finish() {
+            match self
+                .handle_decoded_event(outcome, key, context, &mut opened)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return opened,
+                Err(error) => eprintln!("[ntfy] 消息处理失败：{error}"),
+            }
+        }
+
         opened
+    }
+
+    async fn handle_decoded_event(
+        &self,
+        outcome: DecodeOutcome,
+        key: &SubscriptionKey,
+        context: &RunContext,
+        opened: &mut bool,
+    ) -> Result<bool, String> {
+        let event = match outcome {
+            DecodeOutcome::Data(data) => parse_event(&data),
+            DecodeOutcome::Dropped(_) => None,
+        };
+        match event {
+            Some(IncomingEvent::Open) => {
+                if !*opened {
+                    *opened = true;
+                    if !context.publish_state(SubscriptionState::Connected).await {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Some(IncomingEvent::Message(message)) => {
+                context.deliver_message(&*self.store, &self.commit_gate, key, message)
+            }
+            None => Ok(true),
+        }
     }
 }
 
@@ -618,11 +674,11 @@ impl RunContext {
             if self.is_cancelled_or_stale() {
                 return Ok(false);
             }
+            if validate_persistable_message(&message).is_err() {
+                return Ok(true);
+            }
             if message.topic != key.topic {
-                eprintln!(
-                    "[ntfy] 忽略主题不匹配的事件：期望 {}，收到 {}",
-                    key.topic, message.topic
-                );
+                eprintln!("[ntfy] 忽略主题不匹配的事件");
                 return Ok(true);
             }
             store.commit_message(key, &message, &self.generation_guard())?
@@ -656,39 +712,43 @@ enum IncomingEvent {
     Message(SubscriptionMessage),
 }
 
+#[derive(Deserialize)]
+struct WireEvent {
+    event: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
 pub(crate) fn is_valid_message_id(id: &str) -> bool {
     id.len() == 12 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
-fn parse_line(line: &[u8]) -> Option<IncomingEvent> {
-    let text = std::str::from_utf8(line).ok()?.trim();
-    let data = text.strip_prefix("data:")?.trim_start();
-    let value: Value = serde_json::from_str(data).ok()?;
-    match value.get("event").and_then(Value::as_str).unwrap_or("") {
+fn parse_event(data: &[u8]) -> Option<IncomingEvent> {
+    if data.len() > MAX_NTFY_JSON_BYTES {
+        return None;
+    }
+    let event: WireEvent = serde_json::from_slice(data).ok()?;
+    match event.event.as_str() {
         "open" => Some(IncomingEvent::Open),
         "message" => {
-            let id = value.get("id").and_then(Value::as_str)?;
-            if !is_valid_message_id(id) {
+            let id = event.id?;
+            if !is_valid_message_id(&id) {
                 return None;
             }
-            Some(IncomingEvent::Message(SubscriptionMessage {
-                id: id.to_string(),
-                topic: value
-                    .get("topic")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                title: value
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("ntfy 消息")
-                    .to_string(),
-                message: value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or(data)
-                    .to_string(),
-            }))
+            let message = SubscriptionMessage {
+                id,
+                topic: event.topic?,
+                title: event.title.unwrap_or_else(|| "ntfy 消息".to_string()),
+                message: event.message.unwrap_or_else(|| "triggered".to_string()),
+            };
+            validate_persistable_message(&message).ok()?;
+            Some(IncomingEvent::Message(message))
         }
         _ => None,
     }
@@ -1548,6 +1608,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_and_oversized_events_do_not_block_the_next_valid_message() {
+        let (sender, plan) = channel_plan();
+        let source = MockSource::with_plans([plan]);
+        let store = Arc::new(MockStore::default());
+        let subscription_key = key("https://example.test");
+        store.set_cursor(subscription_key.clone(), CURSOR_0);
+        let controller = SubscriptionController::default();
+        let sink = Arc::new(RecordingSink::default());
+        let task = spawn_subscription(
+            &controller,
+            core_with_store(source, Arc::clone(&store)),
+            config("https://example.test"),
+            Arc::clone(&sink),
+        );
+
+        send(&sender, "data: {\"event\":\"open\"}\n\n");
+        sink.wait_for_state(SubscriptionState::Connected).await;
+        let oversized = serde_json::to_string(&serde_json::json!({
+            "event": "message",
+            "id": "000000000001",
+            "topic": "test-topic",
+            "title": "x".repeat(MAX_TITLE_BYTES + 1),
+            "message": "must be dropped"
+        }))
+        .unwrap();
+        send(
+            &sender,
+            &format!(
+                "data: {oversized}\n\ndata: {{broken json}}\n\ndata: {{\"event\":\"message\",\"id\":\"000000000002\",\"topic\":\"test-topic\",\"message\":\"accepted\"}}\n\n"
+            ),
+        );
+
+        store
+            .wait_for_cursor(&subscription_key, "000000000002")
+            .await;
+        sink.wait_for_messages(1).await;
+        {
+            let messages = sink.messages.lock().unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].id, "000000000002");
+        }
+
+        controller.stop();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_last_message_does_not_advance_cursor_before_reconnect() {
+        let (sender, first_plan) = channel_plan();
+        let source = MockSource::with_plans([first_plan, ConnectPlan::Pending]);
+        let store = Arc::new(MockStore::default());
+        let subscription_key = key("https://example.test");
+        store.set_cursor(subscription_key.clone(), CURSOR_0);
+        let controller = SubscriptionController::default();
+        let sink = Arc::new(RecordingSink::default());
+        let task = spawn_subscription(
+            &controller,
+            core_with_store(Arc::clone(&source), Arc::clone(&store)),
+            config("https://example.test"),
+            Arc::clone(&sink),
+        );
+
+        send(&sender, "data: {\"event\":\"open\"}\n\n");
+        sink.wait_for_state(SubscriptionState::Connected).await;
+        let oversized = serde_json::to_string(&serde_json::json!({
+            "event": "message",
+            "id": "000000000001",
+            "topic": "test-topic",
+            "message": "x".repeat(MAX_MESSAGE_BYTES + 1)
+        }))
+        .unwrap();
+        send(&sender, &format!("data: {oversized}\n\n"));
+        drop(sender);
+        source.wait_for_attempts(2).await;
+
+        assert_eq!(sink.message_count(), 0);
+        assert_eq!(store.cursor(&subscription_key).as_deref(), Some(CURSOR_0));
+        assert_eq!(source.attempts()[1].since.as_deref(), Some(CURSOR_0));
+
+        controller.stop();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn failed_store_commit_does_not_notify_or_advance_cursor() {
         let (sender, first_plan) = channel_plan();
         let source = MockSource::with_plans([first_plan, ConnectPlan::Pending]);
@@ -1745,15 +1889,78 @@ mod tests {
     #[test]
     fn reserved_or_malformed_message_ids_are_not_parsed_as_messages() {
         for id in ["", "all", "latest", "10m", "has/slash", "12345678901"] {
-            let line = format!(
-                "data: {{\"id\":\"{id}\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"ignored\"}}\n"
+            let data = format!(
+                "{{\"id\":\"{id}\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"ignored\"}}"
             );
-            assert!(parse_line(line.as_bytes()).is_none(), "{id}");
+            assert!(parse_event(data.as_bytes()).is_none(), "{id}");
         }
-        assert!(parse_line(
-            b"data: {\"id\":\"AbCdEf123456\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"ok\"}\n"
+        assert!(parse_event(
+            b"{\"id\":\"AbCdEf123456\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"ok\"}"
         )
         .is_some());
+    }
+
+    #[test]
+    fn json_and_persisted_fields_enforce_inclusive_byte_limits() {
+        let mut exact_json = br#"{"event":"open"}"#.to_vec();
+        exact_json.resize(MAX_NTFY_JSON_BYTES, b' ');
+        assert!(matches!(
+            parse_event(&exact_json),
+            Some(IncomingEvent::Open)
+        ));
+        exact_json.push(b' ');
+        assert!(parse_event(&exact_json).is_none());
+
+        let make_message = |title: String, message: String| {
+            serde_json::to_vec(&serde_json::json!({
+                "event": "message",
+                "id": "000000000001",
+                "topic": "test-topic",
+                "title": title,
+                "message": message,
+                "attachment": { "name": "ignored future-compatible field" }
+            }))
+            .unwrap()
+        };
+
+        assert!(parse_event(&make_message(
+            "t".repeat(MAX_TITLE_BYTES),
+            "m".repeat(MAX_MESSAGE_BYTES)
+        ))
+        .is_some());
+        assert!(parse_event(&make_message(
+            "t".repeat(MAX_TITLE_BYTES + 1),
+            "ok".to_string()
+        ))
+        .is_none());
+        assert!(parse_event(&make_message(
+            "ok".to_string(),
+            "m".repeat(MAX_MESSAGE_BYTES + 1)
+        ))
+        .is_none());
+        assert!(parse_event(&make_message("界".repeat(341), "ok".to_string())).is_some());
+        assert!(parse_event(&make_message("界".repeat(342), "ok".to_string())).is_none());
+    }
+
+    #[test]
+    fn malformed_fields_are_dropped_and_missing_message_uses_safe_default() {
+        for data in [
+            br#"{"event":"message","id":"000000000001","topic":"test-topic","title":7}"#.as_slice(),
+            br#"{"event":"message","id":"000000000001","topic":"test-topic","message":false}"#.as_slice(),
+            br#"{"event":"message","id":"000000000001","topic":"test-topic","title":"bad\u0000title"}"#.as_slice(),
+            br#"{"event":"message""#.as_slice(),
+            b"{\xff}".as_slice(),
+        ] {
+            assert!(parse_event(data).is_none());
+        }
+
+        let Some(IncomingEvent::Message(message)) =
+            parse_event(br#"{"event":"message","id":"000000000001","topic":"test-topic"}"#)
+        else {
+            panic!("message without body should use the safe default");
+        };
+        assert_eq!(message.message, "triggered");
+        assert_eq!(message.title, "ntfy 消息");
     }
 
     #[tokio::test]

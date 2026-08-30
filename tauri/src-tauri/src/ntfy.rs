@@ -84,7 +84,9 @@ impl SubscriptionSink for TauriSink {
                     });
                 }
             }
-            notify::show(&message.title, &message.message, "ntfy-Notifier");
+            let title = windows_notification_preview(&message.title, 128);
+            let body = windows_notification_preview(&message.message, 512);
+            notify::show(&title, &body, "ntfy-Notifier");
         }
 
         #[cfg(mobile)]
@@ -111,6 +113,34 @@ impl SubscriptionSink for TauriSink {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_notification_preview(input: &str, max_scalars: usize) -> String {
+    let mut preview = String::new();
+    let mut chars = input.chars();
+    for _ in 0..max_scalars {
+        let Some(character) = chars.next() else {
+            return preview;
+        };
+        preview.push(if is_xml_10_character(character) {
+            character
+        } else {
+            '\u{fffd}'
+        });
+    }
+    if chars.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_xml_10_character(character: char) -> bool {
+    matches!(character, '\u{9}' | '\u{a}' | '\u{d}')
+        || ('\u{20}'..='\u{d7ff}').contains(&character)
+        || ('\u{e000}'..='\u{fffd}').contains(&character)
+        || ('\u{10000}'..='\u{10ffff}').contains(&character)
+}
+
 #[cfg(desktop)]
 fn update_tray(app: &AppHandle, connected: bool) {
     if let Some(tray) = app.tray_by_id("main") {
@@ -122,5 +152,45 @@ fn update_tray(app: &AppHandle, connected: bool) {
         if let Ok(image) = tauri::image::Image::from_bytes(bytes) {
             let _ = tray.set_icon(Some(image));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_notification_preview_is_bounded_and_xml_safe() {
+        let title = windows_notification_preview(&"<&\"'".repeat(100), 128);
+        let body = windows_notification_preview(
+            &format!("{}\u{1}{}", "&".repeat(10), "&".repeat(600)),
+            512,
+        );
+
+        assert_eq!(title.chars().count(), 129);
+        assert_eq!(body.chars().count(), 513);
+        assert!(title.ends_with('…'));
+        assert!(body.ends_with('…'));
+        assert!(title.chars().all(is_xml_10_character));
+        assert!(body.chars().all(is_xml_10_character));
+        assert!(!body.contains('\u{1}'));
+        assert!(body.contains('\u{fffd}'));
+
+        let escaped_bytes = |text: &str| {
+            text.chars()
+                .map(|character| match character {
+                    '&' => 5,
+                    '<' | '>' => 4,
+                    '\'' | '"' => 6,
+                    character => character.len_utf8(),
+                })
+                .sum::<usize>()
+        };
+        assert!(escaped_bytes(&title) + escaped_bytes(&body) < 4 * 1024);
+    }
+
+    #[test]
+    fn windows_notification_preview_keeps_short_text_unchanged() {
+        assert_eq!(windows_notification_preview("正常通知", 128), "正常通知");
     }
 }

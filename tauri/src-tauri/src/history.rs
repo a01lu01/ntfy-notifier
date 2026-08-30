@@ -1,6 +1,7 @@
 use crate::subscription::{
-    is_valid_message_id, GenerationGuard, StoreCommit, SubscriptionKey, SubscriptionMessage,
-    SubscriptionStore,
+    is_valid_message_id, validate_persistable_message, validate_persistable_text, GenerationGuard,
+    StoreCommit, SubscriptionKey, SubscriptionMessage, SubscriptionStore, MAX_MESSAGE_BYTES,
+    MAX_TITLE_BYTES,
 };
 use chrono::Local;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -57,6 +58,7 @@ impl SqliteSubscriptionStore {
         key: &SubscriptionKey,
         message: &SubscriptionMessage,
     ) -> Result<StoreCommit, String> {
+        validate_persistable_message(message).map_err(str::to_string)?;
         if !is_valid_message_id(&message.id) {
             // 官方 ntfy message ID 为 12 位字母数字。忽略其他形状，
             // 防止 all/latest/时长等保留词在下次连接中改变 since 语义。
@@ -150,20 +152,32 @@ pub fn get_messages(limit: usize) -> Vec<HistoryItem> {
     };
     let mut stmt = match conn.prepare(
         "SELECT received_at, title, message FROM messages
+         WHERE length(CAST(COALESCE(title, '') AS BLOB)) <= ?2
+           AND length(CAST(COALESCE(message, '') AS BLOB)) <= ?3
          ORDER BY received_at DESC, rowid DESC LIMIT ?1",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    let rows = stmt.query_map(params![limit as i64], |row| {
-        Ok(HistoryItem {
-            time: row.get(0)?,
-            title: row.get(1).unwrap_or_default(),
-            message: row.get(2).unwrap_or_default(),
-        })
-    });
+    let rows = stmt.query_map(
+        params![
+            limit as i64,
+            MAX_TITLE_BYTES as i64,
+            MAX_MESSAGE_BYTES as i64
+        ],
+        |row| {
+            Ok(HistoryItem {
+                time: row.get(0)?,
+                title: row.get(1).unwrap_or_default(),
+                message: row.get(2).unwrap_or_default(),
+            })
+        },
+    );
     match rows {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+        Ok(rows) => rows
+            .filter_map(|row| row.ok())
+            .filter(|item| validate_persistable_text(&item.title, &item.message).is_ok())
+            .collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -261,6 +275,38 @@ mod tests {
         let items = get_messages(10);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "old");
+    }
+
+    #[test]
+    fn legacy_oversized_or_nul_history_is_not_loaded_into_the_webview() {
+        let _guard = unique_env();
+        {
+            let _db_guard = LOCK.lock().unwrap();
+            let conn = open().unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, received_at, topic, title, message)
+                 VALUES ('legacy-large', '2026-01-01T00:00:00', 'test-topic', 'old', ?1)",
+                params!["x".repeat(MAX_MESSAGE_BYTES + 1)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, received_at, topic, title, message)
+                 VALUES ('legacy-nul', '2026-01-02T00:00:00', 'test-topic', 'bad', ?1)",
+                params!["unsafe\0body"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, received_at, topic, title, message)
+                 VALUES ('legacy-safe', '2026-01-03T00:00:00', 'test-topic', 'safe', 'kept')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let items = get_messages(10);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "safe");
+        assert_eq!(items[0].message, "kept");
     }
 
     #[test]
@@ -379,6 +425,28 @@ mod tests {
             commit(&store, &key, &message("")).unwrap(),
             StoreCommit::Duplicate
         );
+        assert_eq!(message_count(), 0);
+        assert_eq!(store.load_cursor(&key).unwrap(), None);
+    }
+
+    #[test]
+    fn oversized_or_nul_persistent_fields_are_rejected_without_cursor_write() {
+        let _guard = unique_env();
+        let store = SqliteSubscriptionStore;
+        let key = key("https://example.test", "test-topic");
+
+        let mut oversized_title = message(ID_1);
+        oversized_title.title = "x".repeat(crate::subscription::MAX_TITLE_BYTES + 1);
+        assert!(commit(&store, &key, &oversized_title).is_err());
+
+        let mut oversized_body = message(ID_2);
+        oversized_body.message = "x".repeat(crate::subscription::MAX_MESSAGE_BYTES + 1);
+        assert!(commit(&store, &key, &oversized_body).is_err());
+
+        let mut nul = message(ID_3);
+        nul.message = "unsafe\0body".to_string();
+        assert!(commit(&store, &key, &nul).is_err());
+
         assert_eq!(message_count(), 0);
         assert_eq!(store.load_cursor(&key).unwrap(), None);
     }
