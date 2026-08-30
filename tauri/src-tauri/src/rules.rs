@@ -81,7 +81,10 @@ pub fn load() -> Vec<Rule> {
 fn sanitize_rule(mut rule: Rule) -> Rule {
     rule.min_length = rule.min_length.max(1);
     rule.max_length = rule.max_length.max(rule.min_length);
-    if !matches!(rule.match_mode.as_str(), "keyword_only" | "whole_text" | "both") {
+    if !matches!(
+        rule.match_mode.as_str(),
+        "keyword_only" | "whole_text" | "both"
+    ) {
         rule.match_mode = "both".to_string();
     }
     rule
@@ -100,6 +103,7 @@ pub fn save(rules: &[Rule]) -> Result<(), String> {
     fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
+#[cfg_attr(not(any(target_os = "windows", mobile, test)), allow(dead_code))]
 pub fn match_rule(text: &str, rule: &Rule) -> Option<String> {
     let min = rule.min_length.max(1) as usize;
     let max = rule.max_length.max(rule.min_length) as usize;
@@ -111,6 +115,7 @@ pub fn match_rule(text: &str, rule: &Rule) -> Option<String> {
     }
 }
 
+#[cfg_attr(not(any(target_os = "windows", mobile, test)), allow(dead_code))]
 pub fn find_otp(text: &str, rules: &[Rule]) -> Option<String> {
     for rule in rules {
         if !rule.enabled {
@@ -134,11 +139,8 @@ mod tests {
     fn unique_env() -> MutexGuard<'static, ()> {
         let guard = crate::appdata::test_lock().lock().unwrap();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "ntfy-test-rules-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ntfy-test-rules-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         crate::appdata::set(dir);
@@ -190,7 +192,7 @@ mod tests {
         let loaded = load();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "a");
-        assert_eq!(loaded[0].enabled, false);
+        assert!(!loaded[0].enabled);
         assert_eq!(loaded[0].keywords, vec!["A码".to_string()]);
     }
 
@@ -198,7 +200,7 @@ mod tests {
     fn load_recovers_from_corrupt_file() {
         let _guard = unique_env();
         std::fs::create_dir_all(rules_path().parent().unwrap()).unwrap();
-        std::fs::write(&rules_path(), "not json").unwrap();
+        std::fs::write(rules_path(), "not json").unwrap();
         let rules = load();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].name, "默认规则");
@@ -207,7 +209,10 @@ mod tests {
     #[test]
     fn find_otp_uses_default_keywords() {
         let _guard = unique_env();
-        assert_eq!(find_otp("您的验证码是123456", &load()).as_deref(), Some("123456"));
+        assert_eq!(
+            find_otp("您的验证码是123456", &load()).as_deref(),
+            Some("123456")
+        );
     }
 
     #[test]
@@ -216,7 +221,10 @@ mod tests {
         let a = rule("a", "A", &["A码"], 4, 8, "both", true);
         let b = rule("b", "B", &["B码"], 4, 8, "both", true);
         let text = "A码1234 B码567890";
-        assert_eq!(find_otp(text, &[a.clone(), b.clone()]).as_deref(), Some("1234"));
+        assert_eq!(
+            find_otp(text, &[a.clone(), b.clone()]).as_deref(),
+            Some("1234")
+        );
         assert_eq!(find_otp(text, &[b, a]).as_deref(), Some("567890"));
     }
 
@@ -261,6 +269,9 @@ mod tests {
     fn match_rule_clamps_invalid_lengths() {
         let _guard = unique_env();
         let r = rule("c", "C", &["验证码"], 10, 4, "both", true);
-        assert_eq!(match_rule("验证码1234567890", &r).as_deref(), Some("1234567890"));
+        assert_eq!(
+            match_rule("验证码1234567890", &r).as_deref(),
+            Some("1234567890")
+        );
     }
 }

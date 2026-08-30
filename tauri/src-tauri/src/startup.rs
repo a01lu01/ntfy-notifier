@@ -41,9 +41,7 @@ pub fn register_aumid(exe: &str) -> Result<(), String> {
     // 注册表 AUMID
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let key_path = r"Software\Classes\AppUserModelId\ntfy-Notifier";
-    let (key, _) = hkcu
-        .create_subkey(key_path)
-        .map_err(|e| e.to_string())?;
+    let (key, _) = hkcu.create_subkey(key_path).map_err(|e| e.to_string())?;
     let _ = key.set_value("DisplayName", &"ntfy-Notifier");
     let _ = key.set_value("IconUri", &icon.display().to_string());
 

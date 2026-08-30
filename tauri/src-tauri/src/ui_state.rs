@@ -70,7 +70,10 @@ pub fn load() -> UiState {
         let w = widths.get(col).copied().unwrap_or(0);
         widths.insert(col.to_string(), w.max(min));
     }
-    UiState { column_order: order, column_widths: widths }
+    UiState {
+        column_order: order,
+        column_widths: widths,
+    }
 }
 
 pub fn save(order: Vec<String>, widths: HashMap<String, i64>) -> Result<(), String> {
@@ -79,7 +82,10 @@ pub fn save(order: Vec<String>, widths: HashMap<String, i64>) -> Result<(), Stri
         let w = clamped.get(col).copied().unwrap_or(0);
         clamped.insert(col.to_string(), w.max(min));
     }
-    let state = UiState { column_order: order, column_widths: clamped };
+    let state = UiState {
+        column_order: order,
+        column_widths: clamped,
+    };
     let json = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
     let path = state_path();
     if let Some(dir) = path.parent() {
@@ -103,11 +109,8 @@ mod tests {
     fn unique_env() -> MutexGuard<'static, ()> {
         let guard = crate::appdata::test_lock().lock().unwrap();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "ntfy-test-uistate-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ntfy-test-uistate-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         crate::appdata::set(dir);
@@ -127,7 +130,11 @@ mod tests {
         let mut widths = HashMap::new();
         widths.insert("time".to_string(), 10);
         widths.insert("message".to_string(), 99999);
-        save(vec!["message".into(), "time".into(), "title".into()], widths).unwrap();
+        save(
+            vec!["message".into(), "time".into(), "title".into()],
+            widths,
+        )
+        .unwrap();
         let s = load();
         assert_eq!(s.column_widths["time"], 120);
         assert_eq!(s.column_widths["message"], 99999);

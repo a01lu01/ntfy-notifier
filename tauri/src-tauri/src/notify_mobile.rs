@@ -16,7 +16,9 @@ impl<R: Runtime> NotifyMobile<R> {
         struct Payload {
             enabled: bool,
         }
-        let _: Result<(), _> = self.0.run_mobile_plugin("setAutoStart", Payload { enabled });
+        let _: Result<(), _> = self
+            .0
+            .run_mobile_plugin("setAutoStart", Payload { enabled });
     }
 
     pub fn update_notifications(&self, title: &str, message: &str, otp: Option<&str>) {
@@ -28,7 +30,11 @@ impl<R: Runtime> NotifyMobile<R> {
         }
         let _: Result<(), _> = self.0.run_mobile_plugin(
             "updateNotifications",
-            Payload { title, message, otp },
+            Payload {
+                title,
+                message,
+                otp,
+            },
         );
     }
 
@@ -37,7 +43,9 @@ impl<R: Runtime> NotifyMobile<R> {
         struct Payload<'a> {
             text: &'a str,
         }
-        let _: Result<(), _> = self.0.run_mobile_plugin("copyToClipboard", Payload { text });
+        let _: Result<(), _> = self
+            .0
+            .run_mobile_plugin("copyToClipboard", Payload { text });
     }
 }
 

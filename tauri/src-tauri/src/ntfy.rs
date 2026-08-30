@@ -1,8 +1,10 @@
-use crate::{config::Config, history, rules};
-#[cfg(target_os = "windows")]
-use crate::{clipboard, notify};
 #[cfg(mobile)]
 use crate::notify_mobile;
+#[cfg(any(target_os = "windows", mobile))]
+use crate::rules;
+#[cfg(target_os = "windows")]
+use crate::{clipboard, notify};
+use crate::{config::Config, history};
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,11 +75,7 @@ async fn run_loop(cfg: Config, app: AppHandle, connected: Arc<AtomicBool>) {
             continue;
         }
 
-        let url = format!(
-            "{}/{}/sse",
-            cfg.server.trim_end_matches('/'),
-            cfg.topic
-        );
+        let url = format!("{}/{}/sse", cfg.server.trim_end_matches('/'), cfg.topic);
         let mut req = client.get(&url).header("Accept", "text/event-stream");
         if !cfg.username.is_empty() {
             req = req.basic_auth(&cfg.username, Some(&cfg.password));
@@ -94,15 +92,11 @@ async fn run_loop(cfg: Config, app: AppHandle, connected: Arc<AtomicBool>) {
                 let mut stream = resp.bytes_stream();
                 let mut buf: Vec<u8> = Vec::new();
                 loop {
-                    let chunk = match tokio::time::timeout(
-                        Duration::from_secs(120),
-                        stream.next(),
-                    )
-                    .await
-                    {
-                        Ok(Some(Ok(c))) => c,
-                        _ => break,
-                    };
+                    let chunk =
+                        match tokio::time::timeout(Duration::from_secs(120), stream.next()).await {
+                            Ok(Some(Ok(c))) => c,
+                            _ => break,
+                        };
                     buf.extend_from_slice(&chunk);
                     while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                         let line: Vec<u8> = buf.drain(..=pos).collect();
@@ -132,7 +126,7 @@ async fn run_loop(cfg: Config, app: AppHandle, connected: Arc<AtomicBool>) {
     }
 }
 
-async fn handle_line(line: &[u8], app: &AppHandle, cfg: &Config) {
+async fn handle_line(line: &[u8], app: &AppHandle, _cfg: &Config) {
     let text = String::from_utf8_lossy(line).trim().to_string();
     if !text.starts_with("data: ") {
         return;
@@ -147,8 +141,16 @@ async fn handle_line(line: &[u8], app: &AppHandle, cfg: &Config) {
         return;
     }
 
-    let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let topic = msg.get("topic").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = msg
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let topic = msg
+        .get("topic")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let title = msg
         .get("title")
         .and_then(|v| v.as_str())
@@ -163,7 +165,7 @@ async fn handle_line(line: &[u8], app: &AppHandle, cfg: &Config) {
     if let Ok(true) = history::record_message(&id, &topic, &title, &message) {
         #[cfg(target_os = "windows")]
         {
-            if cfg.auto_copy_otp {
+            if _cfg.auto_copy_otp {
                 let rule_list = rules::load();
                 if let Some(otp) = rules::find_otp(&message, &rule_list) {
                     let app2 = app.clone();
@@ -182,7 +184,7 @@ async fn handle_line(line: &[u8], app: &AppHandle, cfg: &Config) {
         {
             let otp = rules::find_otp(&message, &rules::load());
             notify_mobile::update_notifications(app, &title, &message, otp.as_deref());
-            if cfg.auto_copy_otp {
+            if _cfg.auto_copy_otp {
                 if let Some(otp) = otp {
                     let app2 = app.clone();
                     tauri::async_runtime::spawn_blocking(move || {

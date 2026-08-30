@@ -40,12 +40,7 @@ fn open() -> Result<Connection, String> {
 }
 
 /// 记录一条消息；返回 Ok(true) 为新记录，Ok(false) 为重复。
-pub fn record_message(
-    id: &str,
-    topic: &str,
-    title: &str,
-    message: &str,
-) -> Result<bool, String> {
+pub fn record_message(id: &str, topic: &str, title: &str, message: &str) -> Result<bool, String> {
     if id.is_empty() {
         return Ok(false);
     }
@@ -116,11 +111,8 @@ mod tests {
     fn unique_env() -> MutexGuard<'static, ()> {
         let guard = crate::appdata::test_lock().lock().unwrap();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "ntfy-test-history-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ntfy-test-history-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         crate::appdata::set(dir);

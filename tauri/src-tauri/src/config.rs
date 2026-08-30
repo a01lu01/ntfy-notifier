@@ -129,7 +129,9 @@ pub fn decrypt_password(encoded: &str) -> Option<String> {
     if encoded.is_empty() {
         return Some(String::new());
     }
-    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
     let raw = dpapi::unprotect(&bytes)?;
     let wide: Vec<u16> = raw
         .chunks_exact(2)
@@ -141,9 +143,7 @@ pub fn decrypt_password(encoded: &str) -> Option<String> {
 #[cfg(windows)]
 mod dpapi {
     use std::ptr;
-    use winapi::um::dpapi::{
-        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN,
-    };
+    use winapi::um::dpapi::{CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN};
     use winapi::um::winbase::LocalFree;
     use winapi::um::wincrypt::DATA_BLOB;
 

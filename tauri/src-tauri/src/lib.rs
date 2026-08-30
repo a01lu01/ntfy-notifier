@@ -16,6 +16,7 @@ mod notify;
 #[cfg(target_os = "windows")]
 mod startup;
 
+use std::collections::HashMap;
 #[cfg(desktop)]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(desktop)]
@@ -26,10 +27,9 @@ use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
 #[cfg(desktop)]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
 #[cfg(desktop)]
 use tauri::Emitter;
-use std::collections::HashMap;
+use tauri::{AppHandle, Manager};
 
 pub struct AppState {
     pub ntfy: ntfy::NtfyManager,
@@ -129,14 +129,14 @@ impl TrayClickState {
     fn is_recent_double_click(&self) -> bool {
         self.last_double_click
             .lock()
-            .map(|last| {
-                last.is_some_and(|t| t.elapsed() < Duration::from_millis(500))
-            })
+            .map(|last| last.is_some_and(|t| t.elapsed() < Duration::from_millis(500)))
             .unwrap_or(false)
     }
 
     fn next_generation(&self) -> u64 {
-        self.generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1)
+        self.generation
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1)
     }
 
     fn invalidate(&self) {
@@ -165,37 +165,6 @@ impl TrayClickState {
             }
             let _ = tray.with_inner_tray_icon(|inner| inner.show_menu());
         });
-    }
-}
-
-#[cfg(desktop)]
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::Ordering;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn recent_double_click_ignores_single_click() {
-        let state = TrayClickState::default();
-        *state.last_double_click.lock().unwrap() = Some(Instant::now());
-        assert!(state.is_recent_double_click());
-    }
-
-    #[test]
-    fn stale_double_click_allows_single_click() {
-        let state = TrayClickState::default();
-        *state.last_double_click.lock().unwrap() =
-            Some(Instant::now() - Duration::from_millis(600));
-        assert!(!state.is_recent_double_click());
-    }
-
-    #[test]
-    fn generation_change_invalidates_pending_menu() {
-        let state = TrayClickState::default();
-        let generation = state.next_generation();
-        state.invalidate();
-        assert_ne!(state.generation.load(Ordering::SeqCst), generation);
     }
 }
 
@@ -283,26 +252,24 @@ pub fn run() {
                         "quit" => app.exit(0),
                         _ => {}
                     })
-                    .on_tray_icon_event(move |tray, event| {
-                        match event {
-                            TrayIconEvent::Click {
-                                button: MouseButton::Left,
-                                button_state: MouseButtonState::Up,
-                                ..
-                            } => {
-                                click_state.on_left_up(tray.clone());
-                            }
-                            TrayIconEvent::DoubleClick {
-                                button: MouseButton::Left,
-                                ..
-                            } => {
-                                click_state.on_double_click(tray.app_handle());
-                            }
-                            TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. } => {
-                                click_state.invalidate();
-                            }
-                            _ => {}
+                    .on_tray_icon_event(move |tray, event| match event {
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } => {
+                            click_state.on_left_up(tray.clone());
                         }
+                        TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        } => {
+                            click_state.on_double_click(tray.app_handle());
+                        }
+                        TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. } => {
+                            click_state.invalidate();
+                        }
+                        _ => {}
                     })
                     .build(app)?;
             }
@@ -319,4 +286,34 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(all(desktop, test))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn recent_double_click_ignores_single_click() {
+        let state = TrayClickState::default();
+        *state.last_double_click.lock().unwrap() = Some(Instant::now());
+        assert!(state.is_recent_double_click());
+    }
+
+    #[test]
+    fn stale_double_click_allows_single_click() {
+        let state = TrayClickState::default();
+        *state.last_double_click.lock().unwrap() =
+            Some(Instant::now() - Duration::from_millis(600));
+        assert!(!state.is_recent_double_click());
+    }
+
+    #[test]
+    fn generation_change_invalidates_pending_menu() {
+        let state = TrayClickState::default();
+        let generation = state.next_generation();
+        state.invalidate();
+        assert_ne!(state.generation.load(Ordering::SeqCst), generation);
+    }
 }

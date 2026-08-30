@@ -22,7 +22,12 @@ fn message_box(title: &str, message: &str) {
         let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
         let msg_w: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
-            MessageBoxW(std::ptr::null_mut(), msg_w.as_ptr(), title_w.as_ptr(), MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(
+                std::ptr::null_mut(),
+                msg_w.as_ptr(),
+                title_w.as_ptr(),
+                MB_OK | MB_ICONINFORMATION,
+            );
         }
     }
     #[cfg(not(windows))]

@@ -1,8 +1,10 @@
 /// 关键词后查找数字段的窗口大小（字符数）。
+#[cfg_attr(not(any(target_os = "windows", mobile, test)), allow(dead_code))]
 pub const KEYWORD_WINDOW: usize = 30;
 
 /// 在文本中查找第一个长度落在 [min_len, max_len] 内的独立数字段。
 /// 独立数字段 = 连续数字且前后不是数字（或文本边界）。
+#[cfg_attr(not(any(target_os = "windows", mobile, test)), allow(dead_code))]
 pub fn extract_digit_run(text: &str, min_len: usize, max_len: usize) -> Option<String> {
     let mut start: Option<usize> = None;
     let mut count = 0usize;
@@ -29,6 +31,7 @@ pub fn extract_digit_run(text: &str, min_len: usize, max_len: usize) -> Option<S
 
 /// 在关键词后 `window` 字符内查找第一个长度合规的独立数字段。
 /// 多个关键词按出现位置从左到右依次尝试，任一命中即返回。
+#[cfg_attr(not(any(target_os = "windows", mobile, test)), allow(dead_code))]
 pub fn extract_after_keyword(
     text: &str,
     keywords: &[String],
