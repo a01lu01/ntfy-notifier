@@ -4,6 +4,7 @@ mod history;
 mod ntfy;
 mod otp;
 mod rules;
+mod subscription;
 mod ui_state;
 
 #[cfg(mobile)]
