@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="root" path="preferences.json" />
+        <include domain="root" path="ui_state.json" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="root" path="preferences.json" />
+        <include domain="root" path="ui_state.json" />
+    </device-transfer>
+</data-extraction-rules>

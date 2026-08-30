@@ -9,7 +9,7 @@ mod sse;
 mod subscription;
 mod ui_state;
 
-#[cfg(mobile)]
+#[cfg(any(mobile, test))]
 mod notify_mobile;
 
 #[cfg(target_os = "windows")]
@@ -19,6 +19,7 @@ mod notify;
 #[cfg(target_os = "windows")]
 mod startup;
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(desktop)]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +35,70 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, Tray
 #[cfg(desktop)]
 use tauri::Emitter;
 use tauri::{AppHandle, Manager};
+
+const MAX_SAVE_CONFIG_JSON_BYTES: usize = 16 * 1024;
+const MAX_SERVER_BYTES: usize = 4 * 1024;
+const MAX_USERNAME_BYTES: usize = 1024;
+const MAX_PASSWORD_BYTES: usize = 8 * 1024;
+const MAX_TOPIC_BYTES: usize = 64;
+const MAX_THEME_MODE_BYTES: usize = 16;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SaveConfigInput {
+    server: String,
+    username: String,
+    password: String,
+    topic: String,
+    theme_mode: String,
+    auto_start: bool,
+    auto_copy_otp: bool,
+    allow_insecure_http: bool,
+}
+
+impl SaveConfigInput {
+    fn into_config(self) -> Result<config::Config, String> {
+        self.validate_size_limits()?;
+        Ok(config::Config {
+            server: self.server,
+            username: self.username,
+            password: self.password,
+            topic: self.topic,
+            theme_mode: self.theme_mode,
+            auto_start: self.auto_start,
+            auto_copy_otp: self.auto_copy_otp,
+            allow_insecure_http: self.allow_insecure_http,
+        })
+    }
+
+    fn validate_size_limits(&self) -> Result<(), String> {
+        validate_field_size("server", &self.server, MAX_SERVER_BYTES)?;
+        validate_field_size("username", &self.username, MAX_USERNAME_BYTES)?;
+        validate_field_size("password", &self.password, MAX_PASSWORD_BYTES)?;
+        validate_field_size("topic", &self.topic, MAX_TOPIC_BYTES)?;
+        validate_field_size("theme_mode", &self.theme_mode, MAX_THEME_MODE_BYTES)?;
+
+        let serialized_size = serde_json::to_vec(self)
+            .map_err(|_| "配置请求无法安全校验".to_string())?
+            .len();
+        if serialized_size > MAX_SAVE_CONFIG_JSON_BYTES {
+            return Err(format!(
+                "配置请求超过大小限制（最多 {MAX_SAVE_CONFIG_JSON_BYTES} 字节）"
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_field_size(label: &str, value: &str, max_bytes: usize) -> Result<(), String> {
+    if value.len() > max_bytes {
+        Err(format!(
+            "配置字段 {label} 超过大小限制（最多 {max_bytes} 字节）"
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 pub struct AppState {
     pub ntfy: ntfy::NtfyManager,
@@ -52,10 +117,13 @@ fn get_config(state: tauri::State<'_, AppState>) -> Result<config::Config, Strin
 
 #[tauri::command]
 fn save_config(
-    config: config::Config,
+    config: SaveConfigInput,
     state: tauri::State<'_, AppState>,
     app: AppHandle,
 ) -> Result<config::Config, String> {
+    // IPC 输入不复用带 `serde(default)` 的读盘模型：所有字段必须显式传入，
+    // 并在触达 Android Keystore、DPAPI 或任何配置文件之前完成大小校验。
+    let config = config.into_config()?;
     endpoint::validate_subscription_endpoint(
         &config.server,
         &config.topic,
@@ -70,22 +138,28 @@ fn save_config(
         .config
         .lock()
         .map_err(|_| "配置状态锁已损坏".to_string())?;
-    config::save_config(&config)?;
-    *cached = Some(Ok(config.clone()));
+    #[cfg(mobile)]
+    let stored_config = notify_mobile::save_config(&app, &config)?;
+    #[cfg(not(mobile))]
+    let stored_config = {
+        config::save_config(&config)?;
+        config.clone()
+    };
+    *cached = Some(Ok(stored_config.clone()));
     #[cfg(target_os = "windows")]
     {
         let exe = std::env::current_exe()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        let _ = startup::set_auto_start(config.auto_start, &exe);
+        let _ = startup::set_auto_start(stored_config.auto_start, &exe);
     }
     #[cfg(mobile)]
     {
-        notify_mobile::set_auto_start(&app, config.auto_start);
+        notify_mobile::set_auto_start(&app, stored_config.auto_start);
     }
-    state.ntfy.restart(config.clone(), app);
+    state.ntfy.restart(stored_config.clone(), app);
     drop(cached);
-    Ok(config)
+    Ok(stored_config)
 }
 
 #[tauri::command]
@@ -250,6 +324,9 @@ pub fn run() {
             }
 
             let handle = app.handle().clone();
+            #[cfg(mobile)]
+            let loaded_config = notify_mobile::get_config(&handle);
+            #[cfg(not(mobile))]
             let loaded_config = config::load_config();
             {
                 let state = app.state::<AppState>();
@@ -363,5 +440,132 @@ mod tests {
         let generation = state.next_generation();
         state.invalidate();
         assert_ne!(state.generation.load(Ordering::SeqCst), generation);
+    }
+}
+
+#[cfg(test)]
+mod save_config_input_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn sample_input() -> SaveConfigInput {
+        SaveConfigInput {
+            server: "https://ntfy.example.com".to_string(),
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            topic: "alerts".to_string(),
+            theme_mode: "system".to_string(),
+            auto_start: true,
+            auto_copy_otp: false,
+            allow_insecure_http: false,
+        }
+    }
+
+    fn sample_json() -> Value {
+        serde_json::to_value(sample_input()).unwrap()
+    }
+
+    #[test]
+    fn save_input_requires_every_field() {
+        let mut value = sample_json();
+        value.as_object_mut().unwrap().remove("password");
+
+        let error = serde_json::from_value::<SaveConfigInput>(value).unwrap_err();
+
+        assert!(error.to_string().contains("missing field `password`"));
+    }
+
+    #[test]
+    fn save_input_rejects_unknown_fields() {
+        let mut value = sample_json();
+        value["unexpected"] = json!(true);
+
+        let error = serde_json::from_value::<SaveConfigInput>(value).unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `unexpected`"));
+    }
+
+    #[test]
+    fn save_input_keeps_the_frontend_snake_case_contract() {
+        let value = sample_json();
+        let mut fields = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        fields.sort();
+
+        assert_eq!(
+            fields,
+            [
+                "allow_insecure_http",
+                "auto_copy_otp",
+                "auto_start",
+                "password",
+                "server",
+                "theme_mode",
+                "topic",
+                "username",
+            ]
+        );
+        let config = serde_json::from_value::<SaveConfigInput>(value)
+            .unwrap()
+            .into_config()
+            .unwrap();
+        assert_eq!(config.server, "https://ntfy.example.com");
+        assert_eq!(config.theme_mode, "system");
+    }
+
+    #[test]
+    fn save_input_accepts_exact_per_field_size_boundaries() {
+        let mut input = sample_input();
+        input.server = "s".repeat(MAX_SERVER_BYTES);
+        input.username = "u".repeat(MAX_USERNAME_BYTES);
+        input.password = "p".repeat(MAX_PASSWORD_BYTES);
+        input.topic = "t".repeat(MAX_TOPIC_BYTES);
+        input.theme_mode = "m".repeat(MAX_THEME_MODE_BYTES);
+
+        assert!(input.into_config().is_ok());
+    }
+
+    #[test]
+    fn save_input_rejects_each_oversized_field_without_echoing_values() {
+        let cases = [
+            ("server", MAX_SERVER_BYTES),
+            ("username", MAX_USERNAME_BYTES),
+            ("password", MAX_PASSWORD_BYTES),
+            ("topic", MAX_TOPIC_BYTES),
+            ("theme_mode", MAX_THEME_MODE_BYTES),
+        ];
+
+        for (field, limit) in cases {
+            let secret_marker = format!("do-not-echo-{field}");
+            let oversized = format!("{}{}", "x".repeat(limit + 1), secret_marker);
+            let mut value = sample_json();
+            value[field] = Value::String(oversized);
+            let error = serde_json::from_value::<SaveConfigInput>(value)
+                .unwrap()
+                .into_config()
+                .unwrap_err();
+
+            assert!(error.contains(field), "{field}: {error}");
+            assert!(!error.contains(&secret_marker), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn save_input_rejects_oversized_serialized_payload_before_storage() {
+        let mut input = sample_input();
+        // JSON escapes each control character as six ASCII bytes. This remains below the
+        // password field limit while exercising the bound on the actual serialized request.
+        input.password = "\u{1}".repeat(3_000);
+        assert!(input.password.len() < MAX_PASSWORD_BYTES);
+        assert!(serde_json::to_vec(&input).unwrap().len() > MAX_SAVE_CONFIG_JSON_BYTES);
+
+        let error = input.into_config().unwrap_err();
+
+        assert!(error.contains("配置请求超过大小限制"));
+        assert!(!error.contains(&"\u{1}".repeat(16)));
     }
 }
