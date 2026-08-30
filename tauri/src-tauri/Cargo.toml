@@ -19,6 +19,7 @@ desktop = ["tauri/tray-icon", "tauri/image-ico", "dep:tauri-plugin-single-instan
 tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-single-instance = { version = "2", optional = true }
 tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }

@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { aboutContent } from "../src/about-model.js";
+import { aboutContent, PROJECT_URL } from "../src/about-model.js";
+
+test("project URL is the single allowed HTTPS repository address", () => {
+  assert.equal(PROJECT_URL, "https://github.com/a01lu01/ntfy-notifier");
+});
 
 test("desktop about content describes the Windows tray tool", () => {
   const content = aboutContent(false, "1.1.9");

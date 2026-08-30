@@ -184,7 +184,9 @@ pub fn run() {
         builder = builder.plugin(notify_mobile::init());
     }
 
-    builder = builder.plugin(tauri_plugin_dialog::init());
+    builder = builder
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init());
 
     #[cfg(desktop)]
     {

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm as dialogConfirm, message as dialogMessage } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import Sortable from "sortablejs";
 import {
   cellValuesForOrder,
@@ -14,7 +15,8 @@ import {
   ruleSummary,
   validateRule
 } from "./rules-model.js";
-import { aboutContent } from "./about-model.js";
+import { aboutContent, PROJECT_URL } from "./about-model.js";
+import { resolveTheme, restoreSettingsState } from "./settings-model.js";
 
 const PAGES = [
   { id: "push", label: "推送" },
@@ -72,6 +74,9 @@ function buildNav() {
 }
 
 function switchPage(id) {
+  if (currentPage === "settings" && id !== "settings") {
+    restoreSavedSettings();
+  }
   currentPage = id;
   for (const page of PAGES) {
     el(`page-${page.id}`).hidden = page.id !== id;
@@ -85,8 +90,10 @@ function switchPage(id) {
 
 function applyTheme() {
   const mode = config?.theme_mode || "system";
-  const dark = mode === "dark" || (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  document.documentElement.dataset.theme = resolveTheme(
+    mode,
+    window.matchMedia("(prefers-color-scheme: dark)").matches
+  );
 }
 
 /* ---------- 推送页 ---------- */
@@ -444,17 +451,27 @@ async function saveRuleFromForm() {
 
 function fillSettings() {
   if (!config) return;
-  el("set-server").value = config.server || "";
-  el("set-username").value = config.username || "";
-  el("set-password").value = config.password || "";
-  el("set-topic").value = config.topic || "";
-  const theme = config.theme_mode || "system";
-  el("set-theme").dataset.value = theme;
+  const { draft, password, resolvedTheme } = restoreSettingsState(
+    config,
+    window.matchMedia("(prefers-color-scheme: dark)").matches
+  );
+  el("set-server").value = draft.server;
+  el("set-username").value = draft.username;
+  el("set-password").value = draft.password;
+  el("set-password").type = password.inputType;
+  el("toggle-password").textContent = password.toggleLabel;
+  el("set-topic").value = draft.topic;
+  el("set-theme").dataset.value = draft.themeMode;
   el("set-theme").querySelectorAll(".seg-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.value === theme);
+    btn.classList.toggle("active", btn.dataset.value === draft.themeMode);
   });
-  el("set-autostart").checked = !!config.auto_start;
-  el("set-autocopy").checked = !!config.auto_copy_otp;
+  el("set-autostart").checked = draft.autoStart;
+  el("set-autocopy").checked = draft.autoCopyOtp;
+  document.documentElement.dataset.theme = resolvedTheme;
+}
+
+function restoreSavedSettings() {
+  fillSettings();
 }
 
 function buildSettingsPage() {
@@ -507,7 +524,7 @@ function buildSettingsPage() {
       <button class="btn btn-primary" id="btn-save">保存</button>
     </div>
   `;
-  el("btn-cancel").addEventListener("click", fillSettings);
+  el("btn-cancel").addEventListener("click", restoreSavedSettings);
   el("toggle-password").addEventListener("click", () => {
     const input = el("set-password");
     const show = input.type === "password";
@@ -539,12 +556,10 @@ function buildSettingsPage() {
         b.classList.toggle("active", b === btn);
       });
       // 即时预览主题
-      const mode = btn.dataset.value;
-      const dark =
-        mode === "dark" ||
-        (mode === "system" &&
-          window.matchMedia("(prefers-color-scheme: dark)").matches);
-      document.documentElement.dataset.theme = dark ? "dark" : "light";
+      document.documentElement.dataset.theme = resolveTheme(
+        btn.dataset.value,
+        window.matchMedia("(prefers-color-scheme: dark)").matches
+      );
     });
   });
 }
@@ -557,9 +572,17 @@ function buildAboutPage() {
     <div class="page-subtitle">${escapeHtml(about.version)}</div>
     <div class="card">
       <p>${escapeHtml(about.blurb)}</p>
-      <p style="margin-top:8px"><a href="https://github.com/a01lu01/ntfy-notifier" target="_blank">https://github.com/a01lu01/ntfy-notifier</a></p>
+      <p style="margin-top:8px"><a href="${PROJECT_URL}" id="about-project-link" rel="noopener noreferrer">${PROJECT_URL}</a></p>
     </div>
   `;
+  el("about-project-link").addEventListener("click", async (event) => {
+    event.preventDefault();
+    try {
+      await openUrl(PROJECT_URL);
+    } catch {
+      await alertBox("无法打开项目地址。", "打开链接失败");
+    }
+  });
 }
 
 /* ---------- 初始化 ---------- */

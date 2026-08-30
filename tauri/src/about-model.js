@@ -1,3 +1,5 @@
+export const PROJECT_URL = "https://github.com/a01lu01/ntfy-notifier";
+
 export function aboutContent(isMobile, version = "1.1.9") {
   if (isMobile) {
     return {
