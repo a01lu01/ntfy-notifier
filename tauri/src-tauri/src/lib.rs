@@ -1,5 +1,6 @@
 mod appdata;
 mod config;
+mod endpoint;
 mod history;
 mod ntfy;
 mod otp;
@@ -47,6 +48,13 @@ fn save_config(
     state: tauri::State<'_, AppState>,
     app: AppHandle,
 ) -> Result<config::Config, String> {
+    endpoint::validate_subscription_endpoint(
+        &config.server,
+        &config.topic,
+        &config.username,
+        &config.password,
+        config.allow_insecure_http,
+    )?;
     config::save_config(&config)?;
     #[cfg(target_os = "windows")]
     {

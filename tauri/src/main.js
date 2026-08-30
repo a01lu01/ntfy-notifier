@@ -16,7 +16,11 @@ import {
   validateRule
 } from "./rules-model.js";
 import { aboutContent, PROJECT_URL } from "./about-model.js";
-import { resolveTheme, restoreSettingsState } from "./settings-model.js";
+import {
+  getInsecureHttpSaveAction,
+  resolveTheme,
+  restoreSettingsState
+} from "./settings-model.js";
 
 const PAGES = [
   { id: "push", label: "推送" },
@@ -461,6 +465,7 @@ function fillSettings() {
   el("set-password").type = password.inputType;
   el("toggle-password").textContent = password.toggleLabel;
   el("set-topic").value = draft.topic;
+  el("set-allow-insecure-http").checked = draft.allowInsecureHttp;
   el("set-theme").dataset.value = draft.themeMode;
   el("set-theme").querySelectorAll(".seg-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.value === draft.themeMode);
@@ -493,6 +498,13 @@ function buildSettingsPage() {
         </div>
       </div>
       <div class="field"><label>主题</label><input type="text" id="set-topic" placeholder="your-topic"></div>
+      <div class="switch-row">
+        <span>允许远程不安全 HTTP</span>
+        <label class="switch">
+          <input type="checkbox" id="set-allow-insecure-http">
+          <span class="slider"></span>
+        </label>
+      </div>
     </div>
     <div class="card">
       <h3>行为</h3>
@@ -539,15 +551,34 @@ function buildSettingsPage() {
       username: el("set-username").value.trim(),
       password: el("set-password").value,
       topic: el("set-topic").value.trim(),
+      allow_insecure_http: el("set-allow-insecure-http").checked,
       theme_mode: themeMode,
       auto_start: el("set-autostart").checked,
       auto_copy_otp: el("set-autocopy").checked
     };
-    if (next.server.startsWith("http://") && next.password) {
-      if (!(await confirmBox("当前服务器地址使用 http://，密码将以明文在网络上传输，建议改用 https://。仍要保存吗？", "安全提示"))) return;
+    const insecureHttpAction = getInsecureHttpSaveAction(
+      next.server,
+      next.allow_insecure_http
+    );
+    if (insecureHttpAction === "blocked") {
+      await alertBox(
+        "远程 HTTP 会以明文传输通知正文和连接凭据。请改用 HTTPS，或先开启“允许远程不安全 HTTP”。",
+        "无法保存不安全连接"
+      );
+      return;
     }
-    config = await invoke("save_config", { config: next });
-    applyTheme();
+    if (insecureHttpAction === "confirm") {
+      if (!(await confirmBox(
+        "远程 HTTP 会以明文传输通知正文、用户名和密码，可能被同一网络中的其他人窃取。确定仍要保存吗？",
+        "确认使用不安全 HTTP"
+      ))) return;
+    }
+    try {
+      config = await invoke("save_config", { config: next });
+      applyTheme();
+    } catch (error) {
+      await alertBox(`保存失败：${String(error)}`, "无法保存设置");
+    }
   });
   el("set-theme").querySelectorAll(".seg-btn").forEach((btn) => {
     btn.addEventListener("click", () => {

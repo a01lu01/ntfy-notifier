@@ -14,6 +14,7 @@ pub struct Config {
     pub theme_mode: String,
     pub auto_start: bool,
     pub auto_copy_otp: bool,
+    pub allow_insecure_http: bool,
 }
 
 impl Default for Config {
@@ -26,6 +27,7 @@ impl Default for Config {
             theme_mode: "system".to_string(),
             auto_start: false,
             auto_copy_otp: false,
+            allow_insecure_http: false,
         }
     }
 }
@@ -38,6 +40,8 @@ struct DiskConfig {
     theme_mode: String,
     auto_start: bool,
     auto_copy_otp: bool,
+    #[serde(default)]
+    allow_insecure_http: Option<bool>,
     #[serde(default)]
     password: String,
     #[serde(default)]
@@ -59,7 +63,7 @@ pub fn load_config() -> (Config, bool) {
         Ok(r) => r,
         Err(_) => return (Config::default(), true),
     };
-    let disk: DiskConfig = match serde_json::from_str(&raw) {
+    let mut disk: DiskConfig = match serde_json::from_str(&raw) {
         Ok(d) => d,
         Err(_) => {
             // 损坏：备份并重置
@@ -72,6 +76,14 @@ pub fn load_config() -> (Config, bool) {
         }
     };
 
+    let allow_insecure_http = disk
+        .allow_insecure_http
+        .unwrap_or_else(|| crate::endpoint::requires_insecure_http_opt_in(&disk.server));
+    if disk.allow_insecure_http.is_none() {
+        disk.allow_insecure_http = Some(allow_insecure_http);
+        let _ = write_disk_config(&disk);
+    }
+
     let mut cfg = Config {
         server: disk.server,
         username: disk.username,
@@ -80,6 +92,7 @@ pub fn load_config() -> (Config, bool) {
         theme_mode: disk.theme_mode,
         auto_start: disk.auto_start,
         auto_copy_otp: disk.auto_copy_otp,
+        allow_insecure_http,
     };
 
     if !disk.password_encrypted.is_empty() {
@@ -100,9 +113,14 @@ pub fn save_config(cfg: &Config) -> Result<(), String> {
         theme_mode: cfg.theme_mode.clone(),
         auto_start: cfg.auto_start,
         auto_copy_otp: cfg.auto_copy_otp,
+        allow_insecure_http: Some(cfg.allow_insecure_http),
         password: String::new(),
         password_encrypted: encrypt_password(&cfg.password),
     };
+    write_disk_config(&disk)
+}
+
+fn write_disk_config(disk: &DiskConfig) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&disk).map_err(|e| e.to_string())?;
     let path = config_path();
     let dir = path.parent().unwrap();
@@ -231,12 +249,86 @@ mod dpapi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::MutexGuard;
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn unique_env() -> MutexGuard<'static, ()> {
+        let guard = crate::appdata::test_lock().lock().unwrap();
+        let number = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let directory =
+            std::env::temp_dir().join(format!("ntfy-test-config-{}-{number}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        crate::appdata::set(directory);
+        guard
+    }
+
+    fn write_legacy_config(server: &str, allow_insecure_http: Option<bool>) {
+        let mut value = json!({
+            "server": server,
+            "username": "alice",
+            "topic": "alerts",
+            "theme_mode": "system",
+            "auto_start": true,
+            "auto_copy_otp": false,
+            "password": "",
+            "password_encrypted": "not-valid-base64"
+        });
+        if let Some(allow) = allow_insecure_http {
+            value["allow_insecure_http"] = Value::Bool(allow);
+        }
+        std::fs::write(config_path(), serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    }
 
     #[test]
     fn default_config_shape() {
         let cfg = Config::default();
         assert_eq!(cfg.theme_mode, "system");
         assert_eq!(cfg.topic, "");
+        assert!(!cfg.allow_insecure_http);
+    }
+
+    #[test]
+    fn legacy_remote_http_is_migrated_without_rewriting_ciphertext() {
+        let _guard = unique_env();
+        write_legacy_config("HTTP://EXAMPLE.COM", None);
+
+        let (config, _) = load_config();
+        assert!(config.allow_insecure_http);
+
+        let migrated: Value =
+            serde_json::from_slice(&std::fs::read(config_path()).unwrap()).unwrap();
+        assert_eq!(migrated["allow_insecure_http"], Value::Bool(true));
+        assert_eq!(
+            migrated["password_encrypted"],
+            Value::String("not-valid-base64".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_loopback_http_keeps_insecure_opt_in_disabled() {
+        let _guard = unique_env();
+        write_legacy_config("http://127.0.0.1:8080", None);
+
+        let (config, _) = load_config();
+        assert!(!config.allow_insecure_http);
+        let migrated: Value =
+            serde_json::from_slice(&std::fs::read(config_path()).unwrap()).unwrap();
+        assert_eq!(migrated["allow_insecure_http"], Value::Bool(false));
+    }
+
+    #[test]
+    fn explicit_insecure_http_choice_is_not_overwritten() {
+        let _guard = unique_env();
+        write_legacy_config("http://example.com", Some(false));
+
+        let (config, _) = load_config();
+        assert!(!config.allow_insecure_http);
+        let stored: Value = serde_json::from_slice(&std::fs::read(config_path()).unwrap()).unwrap();
+        assert_eq!(stored["allow_insecure_http"], Value::Bool(false));
     }
 
     #[cfg(windows)]

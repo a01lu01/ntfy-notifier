@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::endpoint::{self, ValidatedEndpoint};
 use futures_util::future::BoxFuture;
 use futures_util::{Stream, StreamExt};
 use serde::Serialize;
@@ -18,6 +19,7 @@ pub(crate) struct SubscriptionConfig {
     pub username: String,
     pub password: String,
     pub topic: String,
+    pub allow_insecure_http: bool,
 }
 
 impl From<&Config> for SubscriptionConfig {
@@ -27,7 +29,36 @@ impl From<&Config> for SubscriptionConfig {
             username: config.username.clone(),
             password: config.password.clone(),
             topic: config.topic.clone(),
+            allow_insecure_http: config.allow_insecure_http,
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ValidatedSubscriptionConfig {
+    endpoint: ValidatedEndpoint,
+    username: String,
+    password: String,
+    allow_insecure_http: bool,
+}
+
+impl TryFrom<SubscriptionConfig> for ValidatedSubscriptionConfig {
+    type Error = String;
+
+    fn try_from(config: SubscriptionConfig) -> Result<Self, Self::Error> {
+        let endpoint = endpoint::validate_subscription_endpoint(
+            &config.server,
+            &config.topic,
+            &config.username,
+            &config.password,
+            config.allow_insecure_http,
+        )?;
+        Ok(Self {
+            endpoint,
+            username: config.username,
+            password: config.password,
+            allow_insecure_http: config.allow_insecure_http,
+        })
     }
 }
 
@@ -59,31 +90,59 @@ type SubscriptionStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, String>> + S
 pub(crate) trait SubscriptionSource: Send + Sync {
     fn connect(
         &self,
-        config: SubscriptionConfig,
+        config: ValidatedSubscriptionConfig,
     ) -> BoxFuture<'static, Result<SubscriptionStream, String>>;
 }
 
 struct ReqwestSource {
-    client: Result<reqwest::Client, String>,
+    secure_client: Result<reqwest::Client, String>,
+    insecure_client: Result<reqwest::Client, String>,
+    loopback_secure_client: Result<reqwest::Client, String>,
+    loopback_insecure_client: Result<reqwest::Client, String>,
 }
 
 impl Default for ReqwestSource {
     fn default() -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .map_err(|error| error.to_string()),
+            secure_client: build_client(false, false),
+            insecure_client: build_client(true, false),
+            loopback_secure_client: build_client(false, true),
+            loopback_insecure_client: build_client(true, true),
         }
     }
+}
+
+fn build_client(
+    allow_insecure_http: bool,
+    bypass_system_proxy: bool,
+) -> Result<reqwest::Client, String> {
+    let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+        match endpoint::validate_redirect(attempt.previous(), attempt.url(), allow_insecure_http) {
+            Ok(()) => attempt.follow(),
+            Err(error) => attempt.error(error),
+        }
+    });
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(redirect_policy);
+    if bypass_system_proxy {
+        builder = builder.no_proxy();
+    }
+    builder.build().map_err(|error| error.to_string())
 }
 
 impl SubscriptionSource for ReqwestSource {
     fn connect(
         &self,
-        config: SubscriptionConfig,
+        config: ValidatedSubscriptionConfig,
     ) -> BoxFuture<'static, Result<SubscriptionStream, String>> {
-        let client = match &self.client {
+        let selected_client = match (config.endpoint.loopback_http, config.allow_insecure_http) {
+            (true, true) => &self.loopback_insecure_client,
+            (true, false) => &self.loopback_secure_client,
+            (false, true) => &self.insecure_client,
+            (false, false) => &self.secure_client,
+        };
+        let client = match selected_client {
             Ok(client) => client.clone(),
             Err(error) => {
                 let error = error.clone();
@@ -92,12 +151,9 @@ impl SubscriptionSource for ReqwestSource {
         };
 
         Box::pin(async move {
-            let url = format!(
-                "{}/{}/sse",
-                config.server.trim_end_matches('/'),
-                config.topic
-            );
-            let mut request = client.get(&url).header("Accept", "text/event-stream");
+            let mut request = client
+                .get(config.endpoint.subscription)
+                .header("Accept", "text/event-stream");
             if !config.username.is_empty() {
                 request = request.basic_auth(&config.username, Some(&config.password));
             }
@@ -152,12 +208,16 @@ impl SubscriptionCore {
         if context.is_cancelled_or_stale() {
             return;
         }
-        if config.server.trim().is_empty() || config.topic.trim().is_empty() {
-            context
-                .publish_state(SubscriptionState::ConfigurationError)
-                .await;
-            return;
-        }
+        let config = match ValidatedSubscriptionConfig::try_from(config) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("[ntfy] 订阅配置无效：{error}");
+                context
+                    .publish_state(SubscriptionState::ConfigurationError)
+                    .await;
+                return;
+            }
+        };
 
         let mut delay = self.retry.initial;
         if !context.publish_state(SubscriptionState::Connecting).await {
@@ -509,6 +569,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::time::Instant;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use tokio::sync::Notify;
 
     enum ConnectPlan {
@@ -520,7 +582,7 @@ mod tests {
     #[derive(Default)]
     struct MockSource {
         plans: Mutex<VecDeque<ConnectPlan>>,
-        attempts: Mutex<Vec<SubscriptionConfig>>,
+        attempts: Mutex<Vec<ValidatedSubscriptionConfig>>,
         changed: Notify,
     }
 
@@ -532,7 +594,7 @@ mod tests {
             })
         }
 
-        fn attempts(&self) -> Vec<SubscriptionConfig> {
+        fn attempts(&self) -> Vec<ValidatedSubscriptionConfig> {
             self.attempts.lock().unwrap().clone()
         }
 
@@ -544,7 +606,7 @@ mod tests {
     impl SubscriptionSource for MockSource {
         fn connect(
             &self,
-            config: SubscriptionConfig,
+            config: ValidatedSubscriptionConfig,
         ) -> BoxFuture<'static, Result<SubscriptionStream, String>> {
             self.attempts.lock().unwrap().push(config);
             self.changed.notify_waiters();
@@ -678,6 +740,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             topic: "test-topic".to_string(),
+            allow_insecure_http: false,
         }
     }
 
@@ -838,7 +901,10 @@ mod tests {
         );
         first_sink.wait_for_state(SubscriptionState::Stopped).await;
         source.wait_for_attempts(2).await;
-        assert_eq!(source.attempts()[1].server, "https://new.example");
+        assert_eq!(
+            source.attempts()[1].endpoint.server.as_str(),
+            "https://new.example/"
+        );
 
         send(&sender, "data: {\"event\":\"open\"}\n\n");
         second_sink
@@ -891,7 +957,10 @@ mod tests {
         current_sink
             .wait_for_state(SubscriptionState::Connected)
             .await;
-        assert_eq!(source.attempts()[1].server, "https://current.example");
+        assert_eq!(
+            source.attempts()[1].endpoint.server.as_str(),
+            "https://current.example/"
+        );
 
         controller.stop();
         current_sink
@@ -964,7 +1033,10 @@ mod tests {
         assert_eq!(stale_sink.states(), vec![SubscriptionState::Stopped]);
 
         source.wait_for_attempts(1).await;
-        assert_eq!(source.attempts()[0].server, "https://current.example");
+        assert_eq!(
+            source.attempts()[0].endpoint.server.as_str(),
+            "https://current.example/"
+        );
         send(&sender, "data: {\"event\":\"open\"}\n\n");
         current_sink
             .wait_for_state(SubscriptionState::Connected)
@@ -979,20 +1051,128 @@ mod tests {
 
     #[tokio::test]
     async fn empty_configuration_reports_configuration_error_without_connecting() {
-        let source = MockSource::default();
+        let source = Arc::new(MockSource::default());
         let controller = SubscriptionController::default();
         let sink = Arc::new(RecordingSink::default());
         let task = spawn_subscription(
             &controller,
-            core(Arc::new(source)),
+            core(Arc::clone(&source)),
             SubscriptionConfig::from(&Config::default()),
             Arc::clone(&sink),
         );
 
         sink.wait_for_state(SubscriptionState::ConfigurationError)
             .await;
+        assert!(source.attempts().is_empty());
         controller.stop();
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_configuration_never_reaches_network_source() {
+        let invalid_configs = [
+            SubscriptionConfig {
+                server: "http://example.test".to_string(),
+                username: String::new(),
+                password: String::new(),
+                topic: "alerts".to_string(),
+                allow_insecure_http: false,
+            },
+            SubscriptionConfig {
+                server: "https://user@example.test".to_string(),
+                username: String::new(),
+                password: String::new(),
+                topic: "alerts".to_string(),
+                allow_insecure_http: false,
+            },
+            SubscriptionConfig {
+                server: "https://example.test".to_string(),
+                username: String::new(),
+                password: "secret".to_string(),
+                topic: "alerts".to_string(),
+                allow_insecure_http: false,
+            },
+            SubscriptionConfig {
+                server: "https://example.test".to_string(),
+                username: String::new(),
+                password: String::new(),
+                topic: "invalid/topic".to_string(),
+                allow_insecure_http: false,
+            },
+        ];
+
+        for invalid in invalid_configs {
+            let source = Arc::new(MockSource::default());
+            let controller = SubscriptionController::default();
+            let sink = Arc::new(RecordingSink::default());
+            let task = spawn_subscription(
+                &controller,
+                core(Arc::clone(&source)),
+                invalid,
+                Arc::clone(&sink),
+            );
+
+            sink.wait_for_state(SubscriptionState::ConfigurationError)
+                .await;
+            assert!(source.attempts().is_empty());
+            controller.stop();
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reqwest_source_applies_redirect_validation_before_following() {
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target_listener.local_addr().unwrap();
+        let (target_hit_sender, target_hit_receiver) = oneshot::channel();
+        let target_task = tokio::spawn(async move {
+            let (mut stream, _) = target_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = target_hit_sender.send(());
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                      Content-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+        });
+
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_address = redirect_listener.local_addr().unwrap();
+        let redirect_task = tokio::spawn(async move {
+            let (mut stream, _) = redirect_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://user@{target_address}/alerts/sse\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let config = ValidatedSubscriptionConfig::try_from(SubscriptionConfig {
+            server: format!("http://{redirect_address}"),
+            username: String::new(),
+            password: String::new(),
+            topic: "alerts".to_string(),
+            allow_insecure_http: false,
+        })
+        .unwrap();
+        let source = ReqwestSource::default();
+        let result = tokio::time::timeout(Duration::from_secs(2), source.connect(config))
+            .await
+            .expect("redirect validation timed out");
+
+        assert!(result.is_err(), "redirect with userinfo must be rejected");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), target_hit_receiver)
+                .await
+                .is_err(),
+            "redirect target was contacted before validation"
+        );
+        redirect_task.await.unwrap();
+        target_task.abort();
     }
 
     #[tokio::test]
