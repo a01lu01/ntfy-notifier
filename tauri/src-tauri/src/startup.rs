@@ -442,10 +442,10 @@ mod tests {
         .expect("create COM shortcut");
 
         let actual = read_shortcut_properties(&shortcut).expect("read COM shortcut");
-        assert_eq!(actual.target, executable);
+        assert_same_existing_path(&actual.target, &executable);
         assert_eq!(actual.arguments, OsString::from(arguments));
-        assert_eq!(actual.working_directory, executable_directory);
-        assert_eq!(actual.icon, icon);
+        assert_same_existing_path(&actual.working_directory, &executable_directory);
+        assert_same_existing_path(&actual.icon, &icon);
         assert_eq!(actual.description, OsString::from(description));
         assert_eq!(actual.app_user_model_id, app_id);
     }
@@ -492,10 +492,10 @@ mod tests {
         .expect("replace shortcut");
 
         let actual = read_shortcut_properties(&shortcut).expect("read replaced shortcut");
-        assert_eq!(actual.target, second);
+        assert_same_existing_path(&actual.target, &second);
         assert_eq!(actual.arguments, OsString::from("--second '中文 value'"));
-        assert_eq!(actual.working_directory, second_directory);
-        assert_eq!(actual.icon, second);
+        assert_same_existing_path(&actual.working_directory, &second_directory);
+        assert_same_existing_path(&actual.icon, &second);
         assert_eq!(actual.description, OsString::from("second 中文"));
         assert_eq!(actual.app_user_model_id, "ntfy-Notifier.Second");
     }
@@ -611,5 +611,15 @@ mod tests {
             .position(|unit| *unit == 0)
             .unwrap_or(buffer.len());
         OsString::from_wide(&buffer[..length])
+    }
+
+    fn assert_same_existing_path(actual: &Path, expected: &Path) {
+        // Windows may return the long path from IShellLinkW even when the runner's TEMP
+        // environment supplied the equivalent 8.3 short path. Canonicalizing both existing
+        // paths verifies identity without weakening the Unicode/property round-trip checks.
+        assert_eq!(
+            std::fs::canonicalize(actual).expect("canonicalize shortcut path"),
+            std::fs::canonicalize(expected).expect("canonicalize expected path")
+        );
     }
 }
