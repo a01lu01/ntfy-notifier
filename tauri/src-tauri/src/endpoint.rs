@@ -101,6 +101,12 @@ pub(crate) fn validate_redirect(
     {
         return Err("拒绝从 HTTPS 降级重定向");
     }
+    if previous
+        .last()
+        .is_some_and(|url| url.query() != target.query())
+    {
+        return Err("重定向不得新增、删除或改写订阅参数");
+    }
     if target.scheme() == "http" && !is_loopback_url(target) && !allow_insecure_http {
         return Err("重定向到远程 HTTP 需要明确允许");
     }
@@ -289,5 +295,20 @@ mod tests {
 
         let userinfo = Url::parse("https://user@example.com/topic/sse").unwrap();
         assert!(validate_redirect(&[], &userinfo, false).is_err());
+    }
+
+    #[test]
+    fn redirect_policy_preserves_cursor_query_exactly() {
+        let no_cursor = Url::parse("https://example.com/topic/sse").unwrap();
+        let injected = Url::parse("https://cdn.example.com/topic/sse?since=all").unwrap();
+        let source = Url::parse("https://example.com/topic/sse?since=000000000001").unwrap();
+        let preserved = Url::parse("https://cdn.example.com/topic/sse?since=000000000001").unwrap();
+        let removed = Url::parse("https://cdn.example.com/topic/sse").unwrap();
+        let changed = Url::parse("https://cdn.example.com/topic/sse?since=000000000002").unwrap();
+
+        assert!(validate_redirect(std::slice::from_ref(&no_cursor), &injected, false).is_err());
+        assert!(validate_redirect(std::slice::from_ref(&source), &preserved, false).is_ok());
+        assert!(validate_redirect(std::slice::from_ref(&source), &removed, false).is_err());
+        assert!(validate_redirect(std::slice::from_ref(&source), &changed, false).is_err());
     }
 }

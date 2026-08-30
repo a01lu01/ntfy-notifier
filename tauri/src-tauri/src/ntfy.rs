@@ -1,5 +1,4 @@
 use crate::config::Config;
-use crate::history;
 #[cfg(mobile)]
 use crate::notify_mobile;
 #[cfg(any(target_os = "windows", mobile))]
@@ -68,21 +67,8 @@ impl SubscriptionSink for TauriSink {
     }
 
     fn message_received(&self, message: SubscriptionMessage) -> Result<(), String> {
-        let inserted = match history::record_message(
-            &message.id,
-            &message.topic,
-            &message.title,
-            &message.message,
-        ) {
-            Ok(inserted) => inserted,
-            Err(error) => {
-                eprintln!("[ntfy] 消息入库失败：{error}");
-                return Ok(());
-            }
-        };
-        if !inserted {
-            return Ok(());
-        }
+        #[cfg(not(any(target_os = "windows", mobile)))]
+        let _ = &message;
 
         #[cfg(target_os = "windows")]
         {

@@ -22,6 +22,12 @@ pub(crate) struct SubscriptionConfig {
     pub allow_insecure_http: bool,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SubscriptionKey {
+    pub server: String,
+    pub topic: String,
+}
+
 impl From<&Config> for SubscriptionConfig {
     fn from(config: &Config) -> Self {
         Self {
@@ -37,6 +43,7 @@ impl From<&Config> for SubscriptionConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ValidatedSubscriptionConfig {
     endpoint: ValidatedEndpoint,
+    key: SubscriptionKey,
     username: String,
     password: String,
     allow_insecure_http: bool,
@@ -53,8 +60,17 @@ impl TryFrom<SubscriptionConfig> for ValidatedSubscriptionConfig {
             &config.password,
             config.allow_insecure_http,
         )?;
+        let mut key_url = endpoint.server.clone();
+        if let Ok(mut segments) = key_url.path_segments_mut() {
+            segments.pop_if_empty();
+        }
+        let key = SubscriptionKey {
+            server: key_url.to_string(),
+            topic: config.topic,
+        };
         Ok(Self {
             endpoint,
+            key,
             username: config.username,
             password: config.password,
             allow_insecure_http: config.allow_insecure_http,
@@ -85,12 +101,45 @@ pub(crate) trait SubscriptionSink: Send + Sync {
     fn message_received(&self, message: SubscriptionMessage) -> Result<(), String>;
 }
 
+#[derive(Clone)]
+pub(crate) struct GenerationGuard {
+    generation: u64,
+    current_generation: Arc<AtomicU64>,
+    cancellation: CancellationToken,
+}
+
+impl GenerationGuard {
+    pub(crate) fn is_current(&self) -> bool {
+        !self.cancellation.is_cancelled()
+            && self.current_generation.load(Ordering::SeqCst) == self.generation
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StoreCommit {
+    Inserted,
+    Duplicate,
+    StaleGeneration,
+}
+
+pub(crate) trait SubscriptionStore: Send + Sync {
+    fn load_cursor(&self, key: &SubscriptionKey) -> Result<Option<String>, String>;
+
+    fn commit_message(
+        &self,
+        key: &SubscriptionKey,
+        message: &SubscriptionMessage,
+        generation: &GenerationGuard,
+    ) -> Result<StoreCommit, String>;
+}
+
 type SubscriptionStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, String>> + Send>>;
 
 pub(crate) trait SubscriptionSource: Send + Sync {
     fn connect(
         &self,
         config: ValidatedSubscriptionConfig,
+        since: Option<String>,
     ) -> BoxFuture<'static, Result<SubscriptionStream, String>>;
 }
 
@@ -135,7 +184,14 @@ impl SubscriptionSource for ReqwestSource {
     fn connect(
         &self,
         config: ValidatedSubscriptionConfig,
+        since: Option<String>,
     ) -> BoxFuture<'static, Result<SubscriptionStream, String>> {
+        if since
+            .as_deref()
+            .is_some_and(|cursor| !is_valid_message_id(cursor))
+        {
+            return Box::pin(async { Err("订阅游标格式无效".to_string()) });
+        }
         let selected_client = match (config.endpoint.loopback_http, config.allow_insecure_http) {
             (true, true) => &self.loopback_insecure_client,
             (true, false) => &self.loopback_secure_client,
@@ -151,8 +207,14 @@ impl SubscriptionSource for ReqwestSource {
         };
 
         Box::pin(async move {
+            let mut subscription_url = config.endpoint.subscription;
+            if let Some(since) = since.filter(|cursor| !cursor.is_empty()) {
+                subscription_url
+                    .query_pairs_mut()
+                    .append_pair("since", &since);
+            }
             let mut request = client
-                .get(config.endpoint.subscription)
+                .get(subscription_url)
                 .header("Accept", "text/event-stream");
             if !config.username.is_empty() {
                 request = request.basic_auth(&config.username, Some(&config.password));
@@ -191,6 +253,8 @@ impl Default for RetryPolicy {
 #[derive(Clone)]
 pub(crate) struct SubscriptionCore {
     source: Arc<dyn SubscriptionSource>,
+    store: Arc<dyn SubscriptionStore>,
+    commit_gate: Arc<Mutex<()>>,
     retry: RetryPolicy,
 }
 
@@ -198,6 +262,8 @@ impl Default for SubscriptionCore {
     fn default() -> Self {
         Self {
             source: Arc::new(ReqwestSource::default()),
+            store: Arc::new(crate::history::SqliteSubscriptionStore),
+            commit_gate: Arc::new(Mutex::new(())),
             retry: RetryPolicy::default(),
         }
     }
@@ -228,13 +294,21 @@ impl SubscriptionCore {
             if context.is_cancelled_or_stale() {
                 return;
             }
-            let connection = tokio::select! {
-                _ = context.cancellation.cancelled() => return,
-                connection = self.source.connect(config.clone()) => connection,
+            let connection = match self.store.load_cursor(&config.key) {
+                Ok(since) => {
+                    if context.is_cancelled_or_stale() {
+                        return;
+                    }
+                    tokio::select! {
+                        _ = context.cancellation.cancelled() => return,
+                        connection = self.source.connect(config.clone(), since) => connection,
+                    }
+                }
+                Err(error) => Err(format!("读取订阅游标失败：{error}")),
             };
 
             let opened = match connection {
-                Ok(stream) => self.consume_stream(stream, &context).await,
+                Ok(stream) => self.consume_stream(stream, &config.key, &context).await,
                 Err(error) => {
                     eprintln!("[ntfy] SSE 连接失败：{error}");
                     false
@@ -261,7 +335,12 @@ impl SubscriptionCore {
         }
     }
 
-    async fn consume_stream(&self, mut stream: SubscriptionStream, context: &RunContext) -> bool {
+    async fn consume_stream(
+        &self,
+        mut stream: SubscriptionStream,
+        key: &SubscriptionKey,
+        context: &RunContext,
+    ) -> bool {
         let mut buffer = Vec::new();
         let mut opened = false;
 
@@ -296,9 +375,14 @@ impl SubscriptionCore {
                         }
                     }
                     Some(IncomingEvent::Message(message)) => {
-                        if let Err(error) = context.deliver_message(message) {
-                            eprintln!("[ntfy] 消息处理失败：{error}");
-                            return opened;
+                        match context.deliver_message(&*self.store, &self.commit_gate, key, message)
+                        {
+                            Ok(true) => {}
+                            Ok(false) => return opened,
+                            Err(error) => {
+                                eprintln!("[ntfy] 消息处理失败：{error}");
+                                return opened;
+                            }
                         }
                     }
                     None => {}
@@ -510,11 +594,53 @@ impl RunContext {
         }
     }
 
-    fn deliver_message(&self, message: SubscriptionMessage) -> Result<(), String> {
-        if self.is_cancelled_or_stale() {
-            return Ok(());
+    fn generation_guard(&self) -> GenerationGuard {
+        GenerationGuard {
+            generation: self.generation,
+            current_generation: Arc::clone(&self.current_generation),
+            cancellation: self.cancellation.clone(),
         }
-        self.sink.message_received(message)
+    }
+
+    fn deliver_message(
+        &self,
+        store: &dyn SubscriptionStore,
+        commit_gate: &Mutex<()>,
+        key: &SubscriptionKey,
+        message: SubscriptionMessage,
+    ) -> Result<bool, String> {
+        let commit = {
+            // 仅序列化 generation 判定与持久化。平台 Sink 属于外部回调，
+            // 可能阻塞或重入控制器，绝不能在持有提交锁时调用。
+            let _commit = commit_gate
+                .lock()
+                .map_err(|_| "订阅提交锁不可用".to_string())?;
+            if self.is_cancelled_or_stale() {
+                return Ok(false);
+            }
+            if message.topic != key.topic {
+                eprintln!(
+                    "[ntfy] 忽略主题不匹配的事件：期望 {}，收到 {}",
+                    key.topic, message.topic
+                );
+                return Ok(true);
+            }
+            store.commit_message(key, &message, &self.generation_guard())?
+        };
+
+        match commit {
+            StoreCommit::Inserted => {
+                // Store 在自己的串行临界区内确认 generation 后，消息即被接受。
+                // 即使此刻发生重配置也必须完成一次通知，否则新任务会从已推进的
+                // cursor 继续，造成这条消息永久不可见。
+                if let Err(error) = self.sink.message_received(message) {
+                    eprintln!("[ntfy] 平台通知失败：{error}");
+                }
+                Ok(!self.is_cancelled_or_stale())
+            }
+            StoreCommit::Duplicate => Ok(!self.is_cancelled_or_stale()),
+            StoreCommit::StaleGeneration => Ok(false),
+        }
     }
 
     async fn wait(&self, duration: Duration) -> bool {
@@ -530,34 +656,40 @@ enum IncomingEvent {
     Message(SubscriptionMessage),
 }
 
+pub(crate) fn is_valid_message_id(id: &str) -> bool {
+    id.len() == 12 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
 fn parse_line(line: &[u8]) -> Option<IncomingEvent> {
     let text = std::str::from_utf8(line).ok()?.trim();
     let data = text.strip_prefix("data:")?.trim_start();
     let value: Value = serde_json::from_str(data).ok()?;
     match value.get("event").and_then(Value::as_str).unwrap_or("") {
         "open" => Some(IncomingEvent::Open),
-        "message" => Some(IncomingEvent::Message(SubscriptionMessage {
-            id: value
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            topic: value
-                .get("topic")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            title: value
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or("ntfy 消息")
-                .to_string(),
-            message: value
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or(data)
-                .to_string(),
-        })),
+        "message" => {
+            let id = value.get("id").and_then(Value::as_str)?;
+            if !is_valid_message_id(id) {
+                return None;
+            }
+            Some(IncomingEvent::Message(SubscriptionMessage {
+                id: id.to_string(),
+                topic: value
+                    .get("topic")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                title: value
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("ntfy 消息")
+                    .to_string(),
+                message: value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or(data)
+                    .to_string(),
+            }))
+        }
         _ => None,
     }
 }
@@ -566,12 +698,16 @@ fn parse_line(line: &[u8]) -> Option<IncomingEvent> {
 mod tests {
     use super::*;
     use futures_util::stream;
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Condvar, Mutex};
     use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
+
+    const CURSOR_0: &str = "000000000000";
+    const CURSOR_1: &str = "000000000001";
 
     enum ConnectPlan {
         Fail(&'static str),
@@ -579,10 +715,16 @@ mod tests {
         Stream(mpsc::UnboundedReceiver<Result<Vec<u8>, String>>),
     }
 
+    #[derive(Clone)]
+    struct ConnectAttempt {
+        config: ValidatedSubscriptionConfig,
+        since: Option<String>,
+    }
+
     #[derive(Default)]
     struct MockSource {
         plans: Mutex<VecDeque<ConnectPlan>>,
-        attempts: Mutex<Vec<ValidatedSubscriptionConfig>>,
+        attempts: Mutex<Vec<ConnectAttempt>>,
         changed: Notify,
     }
 
@@ -594,7 +736,7 @@ mod tests {
             })
         }
 
-        fn attempts(&self) -> Vec<ValidatedSubscriptionConfig> {
+        fn attempts(&self) -> Vec<ConnectAttempt> {
             self.attempts.lock().unwrap().clone()
         }
 
@@ -607,8 +749,12 @@ mod tests {
         fn connect(
             &self,
             config: ValidatedSubscriptionConfig,
+            since: Option<String>,
         ) -> BoxFuture<'static, Result<SubscriptionStream, String>> {
-            self.attempts.lock().unwrap().push(config);
+            self.attempts
+                .lock()
+                .unwrap()
+                .push(ConnectAttempt { config, since });
             self.changed.notify_waiters();
             let plan = self.plans.lock().unwrap().pop_front();
             Box::pin(async move {
@@ -626,6 +772,128 @@ mod tests {
                     None => Err("no mock connection plan".to_string()),
                 }
             })
+        }
+    }
+
+    #[derive(Default)]
+    struct MockStoreState {
+        cursors: HashMap<SubscriptionKey, String>,
+        message_ids: HashSet<String>,
+    }
+
+    #[derive(Default)]
+    struct MockStore {
+        state: Mutex<MockStoreState>,
+        fail_load: AtomicBool,
+        fail_commit: AtomicBool,
+        changed: Notify,
+    }
+
+    impl MockStore {
+        fn set_cursor(&self, key: SubscriptionKey, cursor: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .cursors
+                .insert(key, cursor.to_string());
+            self.changed.notify_waiters();
+        }
+
+        fn cursor(&self, key: &SubscriptionKey) -> Option<String> {
+            self.state.lock().unwrap().cursors.get(key).cloned()
+        }
+
+        async fn wait_for_cursor(&self, key: &SubscriptionKey, expected: &str) {
+            wait_until(&self.changed, || {
+                self.cursor(key).as_deref() == Some(expected)
+            })
+            .await;
+        }
+    }
+
+    impl SubscriptionStore for MockStore {
+        fn load_cursor(&self, key: &SubscriptionKey) -> Result<Option<String>, String> {
+            if self.fail_load.load(Ordering::SeqCst) {
+                return Err("cursor load failed".to_string());
+            }
+            Ok(self.state.lock().unwrap().cursors.get(key).cloned())
+        }
+
+        fn commit_message(
+            &self,
+            key: &SubscriptionKey,
+            message: &SubscriptionMessage,
+            generation: &GenerationGuard,
+        ) -> Result<StoreCommit, String> {
+            let mut state = self.state.lock().unwrap();
+            if !generation.is_current() {
+                return Ok(StoreCommit::StaleGeneration);
+            }
+            if self.fail_commit.load(Ordering::SeqCst) {
+                return Err("message commit failed".to_string());
+            }
+            if message.id.is_empty() {
+                return Ok(StoreCommit::Duplicate);
+            }
+            let inserted = state.message_ids.insert(message.id.clone());
+            state.cursors.insert(key.clone(), message.id.clone());
+            drop(state);
+            self.changed.notify_waiters();
+            Ok(if inserted {
+                StoreCommit::Inserted
+            } else {
+                StoreCommit::Duplicate
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingStore {
+        cursor: Mutex<Option<String>>,
+        checked: AtomicBool,
+        checked_changed: Notify,
+        released: Mutex<bool>,
+        release_changed: Condvar,
+    }
+
+    impl BlockingStore {
+        async fn wait_until_checked(&self) {
+            wait_until(&self.checked_changed, || {
+                self.checked.load(Ordering::SeqCst)
+            })
+            .await;
+        }
+
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.release_changed.notify_all();
+        }
+    }
+
+    impl SubscriptionStore for BlockingStore {
+        fn load_cursor(&self, _key: &SubscriptionKey) -> Result<Option<String>, String> {
+            Ok(self.cursor.lock().unwrap().clone())
+        }
+
+        fn commit_message(
+            &self,
+            _key: &SubscriptionKey,
+            message: &SubscriptionMessage,
+            generation: &GenerationGuard,
+        ) -> Result<StoreCommit, String> {
+            let mut cursor = self.cursor.lock().unwrap();
+            if !generation.is_current() {
+                return Ok(StoreCommit::StaleGeneration);
+            }
+            self.checked.store(true, Ordering::SeqCst);
+            self.checked_changed.notify_waiters();
+            let released = self.released.lock().unwrap();
+            let _released = self
+                .release_changed
+                .wait_while(released, |released| !*released)
+                .unwrap();
+            *cursor = Some(message.id.clone());
+            Ok(StoreCommit::Inserted)
         }
     }
 
@@ -681,6 +949,45 @@ mod tests {
                 .push(format!("message:{}", message.id));
             self.messages.lock().unwrap().push(message);
             self.changed.notify_waiters();
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingMessageSink {
+        entered: AtomicBool,
+        entered_changed: Notify,
+        released: Mutex<bool>,
+        release_changed: Condvar,
+        messages: AtomicUsize,
+    }
+
+    impl BlockingMessageSink {
+        async fn wait_until_entered(&self) {
+            wait_until(&self.entered_changed, || {
+                self.entered.load(Ordering::SeqCst)
+            })
+            .await;
+        }
+
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.release_changed.notify_all();
+        }
+    }
+
+    impl SubscriptionSink for Arc<BlockingMessageSink> {
+        fn state_changed(&self, _state: SubscriptionState) {}
+
+        fn message_received(&self, _message: SubscriptionMessage) -> Result<(), String> {
+            self.entered.store(true, Ordering::SeqCst);
+            self.entered_changed.notify_waiters();
+            let released = self.released.lock().unwrap();
+            let _released = self
+                .release_changed
+                .wait_while(released, |released| !*released)
+                .unwrap();
+            self.messages.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -744,20 +1051,35 @@ mod tests {
         }
     }
 
+    fn key(server: &str) -> SubscriptionKey {
+        ValidatedSubscriptionConfig::try_from(config(server))
+            .unwrap()
+            .key
+    }
+
     fn channel_plan() -> (mpsc::UnboundedSender<Result<Vec<u8>, String>>, ConnectPlan) {
         let (sender, receiver) = mpsc::unbounded_channel();
         (sender, ConnectPlan::Stream(receiver))
     }
 
-    fn core(source: Arc<MockSource>) -> SubscriptionCore {
+    fn core_with_store<S>(source: Arc<MockSource>, store: Arc<S>) -> SubscriptionCore
+    where
+        S: SubscriptionStore + 'static,
+    {
         SubscriptionCore {
             source,
+            store,
+            commit_gate: Arc::new(Mutex::new(())),
             retry: RetryPolicy {
                 initial: Duration::from_millis(100),
                 maximum: Duration::from_millis(200),
                 stream_timeout: Duration::from_secs(2),
             },
         }
+    }
+
+    fn core(source: Arc<MockSource>) -> SubscriptionCore {
+        core_with_store(source, Arc::new(MockStore::default()))
     }
 
     fn send(sender: &mpsc::UnboundedSender<Result<Vec<u8>, String>>, event: &str) {
@@ -796,7 +1118,7 @@ mod tests {
         sink.wait_for_state(SubscriptionState::Connecting).await;
         send(
             &sender,
-            "data: {\"id\":\"before-open\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"hello\"}\n\n",
+            "data: {\"id\":\"beforeopen01\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"hello\"}\n\n",
         );
         sink.wait_for_messages(1).await;
         assert!(!sink.states().contains(&SubscriptionState::Connected));
@@ -830,7 +1152,7 @@ mod tests {
             &sender,
             concat!(
                 "data: {\"event\":\"open\"}\n\n",
-                "data: {\"id\":\"after-open\",\"event\":\"message\",",
+                "data: {\"id\":\"afteropen001\",\"event\":\"message\",",
                 "\"topic\":\"test-topic\",\"message\":\"hello\"}\n\n"
             ),
         );
@@ -843,7 +1165,7 @@ mod tests {
             .unwrap();
         let message = events
             .iter()
-            .position(|event| event == "message:after-open")
+            .position(|event| event == "message:afteropen001")
             .unwrap();
         assert!(
             connected < message,
@@ -902,7 +1224,7 @@ mod tests {
         first_sink.wait_for_state(SubscriptionState::Stopped).await;
         source.wait_for_attempts(2).await;
         assert_eq!(
-            source.attempts()[1].endpoint.server.as_str(),
+            source.attempts()[1].config.endpoint.server.as_str(),
             "https://new.example/"
         );
 
@@ -958,7 +1280,7 @@ mod tests {
             .wait_for_state(SubscriptionState::Connected)
             .await;
         assert_eq!(
-            source.attempts()[1].endpoint.server.as_str(),
+            source.attempts()[1].config.endpoint.server.as_str(),
             "https://current.example/"
         );
 
@@ -1034,7 +1356,7 @@ mod tests {
 
         source.wait_for_attempts(1).await;
         assert_eq!(
-            source.attempts()[0].endpoint.server.as_str(),
+            source.attempts()[0].config.endpoint.server.as_str(),
             "https://current.example/"
         );
         send(&sender, "data: {\"event\":\"open\"}\n\n");
@@ -1120,8 +1442,436 @@ mod tests {
         }
     }
 
+    #[test]
+    fn subscription_key_normalizes_equivalent_base_urls() {
+        assert_eq!(
+            key("https://EXAMPLE.test:443/base/"),
+            key("https://example.test/base")
+        );
+        assert_ne!(
+            key("https://example.test/base"),
+            key("https://example.test/other")
+        );
+    }
+
     #[tokio::test]
-    async fn reqwest_source_applies_redirect_validation_before_following() {
+    async fn first_connection_without_cursor_omits_since() {
+        let source = MockSource::with_plans([ConnectPlan::Pending]);
+        let store = Arc::new(MockStore::default());
+        let controller = SubscriptionController::default();
+        let sink = Arc::new(RecordingSink::default());
+        let task = spawn_subscription(
+            &controller,
+            core_with_store(Arc::clone(&source), store),
+            config("https://example.test/base"),
+            Arc::clone(&sink),
+        );
+
+        source.wait_for_attempts(1).await;
+        assert_eq!(source.attempts()[0].since, None);
+        controller.stop();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_uses_cursor_committed_by_previous_stream() {
+        let (sender, first_plan) = channel_plan();
+        let source = MockSource::with_plans([first_plan, ConnectPlan::Pending]);
+        let store = Arc::new(MockStore::default());
+        let subscription_key = key("https://example.test");
+        store.set_cursor(subscription_key.clone(), CURSOR_0);
+        let controller = SubscriptionController::default();
+        let sink = Arc::new(RecordingSink::default());
+        let task = spawn_subscription(
+            &controller,
+            core_with_store(Arc::clone(&source), Arc::clone(&store)),
+            config("https://example.test"),
+            Arc::clone(&sink),
+        );
+
+        source.wait_for_attempts(1).await;
+        assert_eq!(source.attempts()[0].since.as_deref(), Some(CURSOR_0));
+        send(&sender, "data: {\"event\":\"open\"}\n\n");
+        send(
+            &sender,
+            "data: {\"id\":\"000000000001\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"hello\"}\n\n",
+        );
+        sink.wait_for_messages(1).await;
+        store.wait_for_cursor(&subscription_key, CURSOR_1).await;
+        drop(sender);
+        source.wait_for_attempts(2).await;
+
+        assert_eq!(source.attempts()[1].since.as_deref(), Some(CURSOR_1));
+        assert_eq!(store.cursor(&subscription_key).as_deref(), Some(CURSOR_1));
+        assert_eq!(source.attempts()[1].config.key, subscription_key);
+        controller.stop();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mismatched_event_topic_is_not_committed_or_notified() {
+        let (sender, plan) = channel_plan();
+        let source = MockSource::with_plans([plan]);
+        let store = Arc::new(MockStore::default());
+        let subscription_key = key("https://example.test");
+        let controller = SubscriptionController::default();
+        let sink = Arc::new(RecordingSink::default());
+        let task = spawn_subscription(
+            &controller,
+            core_with_store(source, Arc::clone(&store)),
+            config("https://example.test"),
+            Arc::clone(&sink),
+        );
+
+        send(&sender, "data: {\"event\":\"open\"}\n\n");
+        sink.wait_for_state(SubscriptionState::Connected).await;
+        send(
+            &sender,
+            "data: {\"id\":\"000000000001\",\"event\":\"message\",\"topic\":\"spoofed\",\"message\":\"ignored\"}\n\n",
+        );
+        send(
+            &sender,
+            "data: {\"id\":\"000000000002\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"accepted\"}\n\n",
+        );
+        store
+            .wait_for_cursor(&subscription_key, "000000000002")
+            .await;
+        sink.wait_for_messages(1).await;
+
+        {
+            let messages = sink.messages.lock().unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].id, "000000000002");
+        }
+        controller.stop();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_store_commit_does_not_notify_or_advance_cursor() {
+        let (sender, first_plan) = channel_plan();
+        let source = MockSource::with_plans([first_plan, ConnectPlan::Pending]);
+        let store = Arc::new(MockStore::default());
+        let subscription_key = key("https://example.test");
+        store.set_cursor(subscription_key.clone(), CURSOR_0);
+        store.fail_commit.store(true, Ordering::SeqCst);
+        let controller = SubscriptionController::default();
+        let sink = Arc::new(RecordingSink::default());
+        let task = spawn_subscription(
+            &controller,
+            core_with_store(Arc::clone(&source), Arc::clone(&store)),
+            config("https://example.test"),
+            Arc::clone(&sink),
+        );
+
+        send(&sender, "data: {\"event\":\"open\"}\n\n");
+        sink.wait_for_state(SubscriptionState::Connected).await;
+        send(
+            &sender,
+            "data: {\"id\":\"000000000001\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"hello\"}\n\n",
+        );
+        sink.wait_for_state(SubscriptionState::Retrying).await;
+        source.wait_for_attempts(2).await;
+
+        assert_eq!(sink.message_count(), 0);
+        assert_eq!(store.cursor(&subscription_key).as_deref(), Some(CURSOR_0));
+        assert_eq!(source.attempts()[1].since.as_deref(), Some(CURSOR_0));
+        controller.stop();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cursor_load_failure_retries_without_contacting_source() {
+        let source = Arc::new(MockSource::default());
+        let store = Arc::new(MockStore::default());
+        store.fail_load.store(true, Ordering::SeqCst);
+        let controller = SubscriptionController::default();
+        let sink = Arc::new(RecordingSink::default());
+        let task = spawn_subscription(
+            &controller,
+            core_with_store(Arc::clone(&source), store),
+            config("https://example.test"),
+            Arc::clone(&sink),
+        );
+
+        sink.wait_for_state(SubscriptionState::Retrying).await;
+        assert!(source.attempts().is_empty());
+        controller.stop();
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn stale_generation_cannot_commit_cursor() {
+        let store = MockStore::default();
+        let subscription_key = key("https://example.test");
+        let generation = GenerationGuard {
+            generation: 1,
+            current_generation: Arc::new(AtomicU64::new(2)),
+            cancellation: CancellationToken::new(),
+        };
+        let message = SubscriptionMessage {
+            id: CURSOR_1.to_string(),
+            topic: "test-topic".to_string(),
+            title: "title".to_string(),
+            message: "body".to_string(),
+        };
+
+        assert_eq!(
+            store
+                .commit_message(&subscription_key, &message, &generation)
+                .unwrap(),
+            StoreCommit::StaleGeneration
+        );
+        assert_eq!(store.cursor(&subscription_key), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accepted_commit_is_not_lost_when_reconfigured_mid_transaction() {
+        let (sender, first_plan) = channel_plan();
+        let source = MockSource::with_plans([first_plan, ConnectPlan::Pending]);
+        let store = Arc::new(BlockingStore::default());
+        let core = SubscriptionCore {
+            source: source.clone(),
+            store: store.clone(),
+            commit_gate: Arc::new(Mutex::new(())),
+            retry: RetryPolicy {
+                initial: Duration::from_millis(100),
+                maximum: Duration::from_millis(200),
+                stream_timeout: Duration::from_secs(2),
+            },
+        };
+        let controller = SubscriptionController::default();
+        let old_sink = Arc::new(RecordingSink::default());
+        let new_sink = Arc::new(RecordingSink::default());
+        let old_task = spawn_subscription(
+            &controller,
+            core.clone(),
+            config("https://example.test"),
+            Arc::clone(&old_sink),
+        );
+        source.wait_for_attempts(1).await;
+        send(&sender, "data: {\"event\":\"open\"}\n\n");
+        old_sink.wait_for_state(SubscriptionState::Connected).await;
+        send(
+            &sender,
+            "data: {\"id\":\"000000000001\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"accepted\"}\n\n",
+        );
+        store.wait_until_checked().await;
+
+        let new_task = spawn_subscription(
+            &controller,
+            core,
+            config("https://example.test"),
+            Arc::clone(&new_sink),
+        );
+        store.release();
+
+        old_sink.wait_for_messages(1).await;
+        source.wait_for_attempts(2).await;
+        assert_eq!(old_sink.message_count(), 1);
+        assert_eq!(new_sink.message_count(), 0);
+        assert_eq!(source.attempts()[1].since.as_deref(), Some(CURSOR_1));
+
+        controller.stop();
+        old_task.await.unwrap();
+        new_task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn blocking_old_sink_does_not_block_new_generation_commit() {
+        let (old_sender, old_plan) = channel_plan();
+        let (new_sender, new_plan) = channel_plan();
+        let source = MockSource::with_plans([old_plan, new_plan]);
+        let store = Arc::new(MockStore::default());
+        let core = core_with_store(Arc::clone(&source), Arc::clone(&store));
+        let subscription_key = key("https://example.test");
+        let controller = SubscriptionController::default();
+        let old_sink = Arc::new(BlockingMessageSink::default());
+        let new_sink = Arc::new(RecordingSink::default());
+        let old_task = spawn_subscription(
+            &controller,
+            core.clone(),
+            config("https://example.test"),
+            Arc::clone(&old_sink),
+        );
+        source.wait_for_attempts(1).await;
+        send(&old_sender, "data: {\"event\":\"open\"}\n\n");
+        send(
+            &old_sender,
+            "data: {\"id\":\"000000000001\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"old\"}\n\n",
+        );
+        old_sink.wait_until_entered().await;
+
+        let new_task = spawn_subscription(
+            &controller,
+            core,
+            config("https://example.test"),
+            Arc::clone(&new_sink),
+        );
+        source.wait_for_attempts(2).await;
+        assert_eq!(source.attempts()[1].since.as_deref(), Some(CURSOR_1));
+        send(&new_sender, "data: {\"event\":\"open\"}\n\n");
+        send(
+            &new_sender,
+            "data: {\"id\":\"000000000002\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"new\"}\n\n",
+        );
+
+        let delivered = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let notified = new_sink.changed.notified();
+                if new_sink.message_count() == 1 {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await;
+        old_sink.release();
+
+        assert!(
+            delivered.is_ok(),
+            "new generation was blocked by the old platform callback"
+        );
+        assert_eq!(
+            store.cursor(&subscription_key).as_deref(),
+            Some("000000000002")
+        );
+        controller.stop();
+        old_task.await.unwrap();
+        new_task.await.unwrap();
+        assert_eq!(old_sink.messages.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn reserved_or_malformed_message_ids_are_not_parsed_as_messages() {
+        for id in ["", "all", "latest", "10m", "has/slash", "12345678901"] {
+            let line = format!(
+                "data: {{\"id\":\"{id}\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"ignored\"}}\n"
+            );
+            assert!(parse_line(line.as_bytes()).is_none(), "{id}");
+        }
+        assert!(parse_line(
+            b"data: {\"id\":\"AbCdEf123456\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"ok\"}\n"
+        )
+        .is_some());
+    }
+
+    #[tokio::test]
+    async fn reqwest_source_encodes_since_as_one_query_parameter() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            request_sender
+                .send(String::from_utf8_lossy(&request[..count]).into_owned())
+                .unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let config = ValidatedSubscriptionConfig::try_from(SubscriptionConfig {
+            server: format!("http://{address}/base"),
+            username: String::new(),
+            password: String::new(),
+            topic: "alerts".to_string(),
+            allow_insecure_http: false,
+        })
+        .unwrap();
+
+        let source = ReqwestSource::default();
+        drop(
+            source
+                .connect(config, Some(CURSOR_1.to_string()))
+                .await
+                .unwrap(),
+        );
+        let request = request_receiver.await.unwrap();
+        assert_eq!(
+            request.lines().next(),
+            Some("GET /base/alerts/sse?since=000000000001 HTTP/1.1")
+        );
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reqwest_source_rejects_invalid_cursor_before_network() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = ValidatedSubscriptionConfig::try_from(SubscriptionConfig {
+            server: format!("http://{address}"),
+            username: String::new(),
+            password: String::new(),
+            topic: "alerts".to_string(),
+            allow_insecure_http: false,
+        })
+        .unwrap();
+
+        let source = ReqwestSource::default();
+        let result = source.connect(config, Some("all".to_string())).await;
+        assert!(result.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), listener.accept())
+                .await
+                .is_err(),
+            "invalid cursor reached the network"
+        );
+    }
+
+    #[tokio::test]
+    async fn reqwest_source_rejects_redirect_that_injects_replay_query() {
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target_listener.local_addr().unwrap();
+        let (target_hit_sender, target_hit_receiver) = oneshot::channel();
+        let target_task = tokio::spawn(async move {
+            let (mut stream, _) = target_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = target_hit_sender.send(());
+        });
+
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_address = redirect_listener.local_addr().unwrap();
+        let redirect_task = tokio::spawn(async move {
+            let (mut stream, _) = redirect_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/alerts/sse?since=all\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let config = ValidatedSubscriptionConfig::try_from(SubscriptionConfig {
+            server: format!("http://{redirect_address}"),
+            username: String::new(),
+            password: String::new(),
+            topic: "alerts".to_string(),
+            allow_insecure_http: false,
+        })
+        .unwrap();
+        let source = ReqwestSource::default();
+        let result = tokio::time::timeout(Duration::from_secs(2), source.connect(config, None))
+            .await
+            .expect("redirect validation timed out");
+
+        assert!(result.is_err(), "redirect query injection must be rejected");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), target_hit_receiver)
+                .await
+                .is_err(),
+            "redirect target was contacted before validation"
+        );
+        redirect_task.await.unwrap();
+        target_task.abort();
+    }
+
+    #[tokio::test]
+    async fn reqwest_source_rejects_redirect_that_drops_cursor() {
         let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target_address = target_listener.local_addr().unwrap();
         let (target_hit_sender, target_hit_receiver) = oneshot::channel();
@@ -1145,7 +1895,7 @@ mod tests {
             let mut request = [0_u8; 1024];
             let _ = stream.read(&mut request).await;
             let response = format!(
-                "HTTP/1.1 302 Found\r\nLocation: http://user@{target_address}/alerts/sse\r\n\
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/alerts/sse\r\n\
                  Content-Length: 0\r\nConnection: close\r\n\r\n"
             );
             stream.write_all(response.as_bytes()).await.unwrap();
@@ -1160,11 +1910,14 @@ mod tests {
         })
         .unwrap();
         let source = ReqwestSource::default();
-        let result = tokio::time::timeout(Duration::from_secs(2), source.connect(config))
-            .await
-            .expect("redirect validation timed out");
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            source.connect(config, Some(CURSOR_1.to_string())),
+        )
+        .await
+        .expect("redirect validation timed out");
 
-        assert!(result.is_err(), "redirect with userinfo must be rejected");
+        assert!(result.is_err(), "redirect without cursor must be rejected");
         assert!(
             tokio::time::timeout(Duration::from_millis(150), target_hit_receiver)
                 .await
@@ -1176,9 +1929,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sink_failure_drops_stream_and_retries() {
+    async fn reqwest_source_follows_redirect_that_preserves_cursor() {
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target_listener.local_addr().unwrap();
+        let (target_request_sender, target_request_receiver) = oneshot::channel();
+        let target_task = tokio::spawn(async move {
+            let (mut stream, _) = target_listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            target_request_sender
+                .send(String::from_utf8_lossy(&request[..count]).into_owned())
+                .unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_address = redirect_listener.local_addr().unwrap();
+        let redirect_task = tokio::spawn(async move {
+            let (mut stream, _) = redirect_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/alerts/sse?since={CURSOR_1}\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let config = ValidatedSubscriptionConfig::try_from(SubscriptionConfig {
+            server: format!("http://{redirect_address}"),
+            username: String::new(),
+            password: String::new(),
+            topic: "alerts".to_string(),
+            allow_insecure_http: false,
+        })
+        .unwrap();
+        let source = ReqwestSource::default();
+        drop(
+            source
+                .connect(config, Some(CURSOR_1.to_string()))
+                .await
+                .unwrap(),
+        );
+
+        let target_request = target_request_receiver.await.unwrap();
+        assert_eq!(
+            target_request.lines().next(),
+            Some("GET /alerts/sse?since=000000000001 HTTP/1.1")
+        );
+        redirect_task.await.unwrap();
+        target_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sink_failure_does_not_rewind_committed_cursor() {
         let (sender, plan) = channel_plan();
-        let source = MockSource::with_plans([plan]);
+        let source = MockSource::with_plans([plan, ConnectPlan::Pending]);
+        let store = Arc::new(MockStore::default());
+        let subscription_key = key("https://example.test");
         let controller = SubscriptionController::default();
         let sink = Arc::new(RecordingSink {
             fail_messages: true,
@@ -1186,7 +1997,7 @@ mod tests {
         });
         let task = spawn_subscription(
             &controller,
-            core(source),
+            core_with_store(Arc::clone(&source), Arc::clone(&store)),
             config("https://example.test"),
             Arc::clone(&sink),
         );
@@ -1195,10 +2006,15 @@ mod tests {
         sink.wait_for_state(SubscriptionState::Connected).await;
         send(
             &sender,
-            "data: {\"id\":\"1\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"hello\"}\n\n",
+            "data: {\"id\":\"000000000001\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"hello\"}\n\n",
         );
-        sink.wait_for_state(SubscriptionState::Retrying).await;
-        assert_eq!(sink.last_state(), Some(SubscriptionState::Retrying));
+        store.wait_for_cursor(&subscription_key, CURSOR_1).await;
+        assert_eq!(sink.message_count(), 0);
+        assert_eq!(sink.last_state(), Some(SubscriptionState::Connected));
+
+        drop(sender);
+        source.wait_for_attempts(2).await;
+        assert_eq!(source.attempts()[1].since.as_deref(), Some(CURSOR_1));
 
         controller.stop();
         task.await.unwrap();
