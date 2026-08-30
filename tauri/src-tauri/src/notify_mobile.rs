@@ -99,16 +99,6 @@ impl<R: Runtime> NotifyMobile<R> {
             .run_mobile_plugin("reconfigureService", ())
             .map_err(|error| format!("重配置 Android 订阅服务失败：{error}"))
     }
-
-    pub fn set_auto_start(&self, enabled: bool) -> Result<(), String> {
-        #[derive(Serialize)]
-        struct Payload {
-            enabled: bool,
-        }
-        self.0
-            .run_mobile_plugin("setAutoStart", Payload { enabled })
-            .map_err(|error| format!("更新 Android 开机订阅兼容状态失败：{error}"))
-    }
 }
 
 #[cfg(mobile)]
@@ -156,13 +146,6 @@ pub fn save_config(
     state(app)
         .ok_or_else(|| "Android 通知插件尚未初始化".to_string())?
         .save_config(config)
-}
-
-#[cfg(mobile)]
-pub fn set_auto_start(app: &AppHandle, enabled: bool) -> Result<(), String> {
-    state(app)
-        .ok_or_else(|| "Android 通知插件尚未初始化".to_string())?
-        .set_auto_start(enabled)
 }
 
 #[cfg(test)]

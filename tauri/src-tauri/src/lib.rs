@@ -171,8 +171,6 @@ fn save_config(
             }
         }
     }
-    #[cfg(mobile)]
-    notify_mobile::set_auto_start(&app, stored_config.auto_start)?;
     #[cfg(target_os = "android")]
     notify_mobile::reconfigure_service(&app)?;
     #[cfg(desktop)]
@@ -432,9 +430,6 @@ pub fn run() {
             #[cfg(mobile)]
             {
                 if let Some(cfg) = cfg.as_ref() {
-                    if let Err(error) = notify_mobile::set_auto_start(&handle, cfg.auto_start) {
-                        eprintln!("Android auto-start compatibility update failed: {error}");
-                    }
                     if !cfg.server.trim().is_empty() && !cfg.topic.trim().is_empty() {
                         if let Err(error) = notify_mobile::start_service(&handle) {
                             eprintln!("Android subscriber service start failed: {error}");

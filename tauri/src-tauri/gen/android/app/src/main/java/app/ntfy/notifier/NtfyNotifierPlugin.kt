@@ -84,20 +84,6 @@ class NtfyNotifierPlugin(private val activity: Activity) : Plugin(activity) {
     invoke.resolve()
   }
 
-  @Command
-  fun setAutoStart(invoke: Invoke) {
-    val args = invoke.getArgs()
-    if (NotificationService.setAutoStart(
-        activity.applicationContext,
-        args.getBoolean("enabled", false)
-      )
-    ) {
-      invoke.resolve()
-    } else {
-      invoke.reject("CONFIG_IO: 保存开机启动设置失败")
-    }
-  }
-
   private fun requestNotificationPermission() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
       if (ContextCompat.checkSelfPermission(activity, Manifest.permission.POST_NOTIFICATIONS) !=

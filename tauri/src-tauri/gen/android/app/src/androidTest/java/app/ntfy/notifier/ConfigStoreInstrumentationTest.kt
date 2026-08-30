@@ -49,6 +49,183 @@ class ConfigStoreInstrumentationTest {
   }
 
   @Test
+  fun autoStartPolicyReadsVersionlessAndV2BooleansWithoutMigration() {
+    val documents = listOf(
+      JSONObject()
+        .put("auto_start", true)
+        .put("password_encrypted", "not-valid-legacy-ciphertext")
+        .toString(2).toByteArray(Charsets.UTF_8) to true,
+      JSONObject()
+        .put("auto_start", false)
+        .toString(2).toByteArray(Charsets.UTF_8) to false,
+      JSONObject()
+        .put("version", 2)
+        .put("auto_start", true)
+        .toString(2).toByteArray(Charsets.UTF_8) to true,
+      JSONObject()
+        .put("version", 2)
+        .put("auto_start", false)
+        .put(
+          "credential",
+          JSONObject()
+            .put("provider", "unsupported")
+            .put("version", "invalid")
+            .put("ciphertext", "not-base64")
+        )
+        .toString(2).toByteArray(Charsets.UTF_8) to false
+    )
+
+    documents.forEach { (original, expected) ->
+      configFile().writeBytes(original)
+
+      assertEquals(expected, store.loadSubscriberAutoStartPolicy())
+      assertArrayEquals(original, configFile().readBytes())
+    }
+
+    assertFalse(preferencesFile().exists())
+    assertFalse(keyExists())
+  }
+
+  @Test
+  fun autoStartPolicyIgnoresCredentialAndPreferencesWithoutCallingCipherOrWriter() {
+    val originalConfig = JSONObject()
+      .put("version", 2)
+      .put("auto_start", true)
+      .put(
+        "credential",
+        JSONObject()
+          .put("provider", AndroidKeystoreCredentialCipher.PROVIDER)
+          .put("version", AndroidKeystoreCredentialCipher.CREDENTIAL_VERSION)
+          .put("ciphertext", "unreadable-ciphertext")
+      )
+      .toString(2).toByteArray(Charsets.UTF_8)
+    val originalPreferences = "{invalid-preferences:must-remain-untouched"
+      .toByteArray(Charsets.UTF_8)
+    configFile().writeBytes(originalConfig)
+    preferencesFile().writeBytes(originalPreferences)
+    val rejectingCipher = RejectingCredentialCipher()
+    val rejectingWriter = RejectingConfigFileWriter()
+    val policyStore = ConfigStore(root, rejectingCipher, rejectingWriter)
+
+    assertTrue(policyStore.loadSubscriberAutoStartPolicy())
+
+    assertEquals(0, rejectingCipher.encryptCalls)
+    assertEquals(0, rejectingCipher.decryptCalls)
+    assertEquals(0, rejectingWriter.writeCalls)
+    assertEquals(0, rejectingWriter.deleteCalls)
+    assertArrayEquals(originalConfig, configFile().readBytes())
+    assertArrayEquals(originalPreferences, preferencesFile().readBytes())
+    assertFalse(keyExists())
+  }
+
+  @Test
+  fun autoStartPolicyMissingConfigFailsClosedWithoutReadingPreferences() {
+    val originalPreferences = "{invalid-preferences:must-remain-untouched"
+      .toByteArray(Charsets.UTF_8)
+    preferencesFile().writeBytes(originalPreferences)
+    val rejectingCipher = RejectingCredentialCipher()
+    val rejectingWriter = RejectingConfigFileWriter()
+    val policyStore = ConfigStore(root, rejectingCipher, rejectingWriter)
+
+    assertFalse(policyStore.loadSubscriberAutoStartPolicy())
+
+    assertEquals(0, rejectingCipher.encryptCalls)
+    assertEquals(0, rejectingCipher.decryptCalls)
+    assertEquals(0, rejectingWriter.writeCalls)
+    assertEquals(0, rejectingWriter.deleteCalls)
+    assertArrayEquals(originalPreferences, preferencesFile().readBytes())
+    assertFalse(configFile().exists())
+  }
+
+  @Test
+  fun autoStartPolicyRejectsUnsupportedVersionsAndInvalidFieldTypes() {
+    configFile().writeText(JSONObject().put("version", 3).put("auto_start", true).toString())
+    expectError(ConfigStoreError.CONFIG_VERSION) {
+      store.loadSubscriberAutoStartPolicy()
+    }
+
+    configFile().writeText(JSONObject().put("version", "2").put("auto_start", true).toString())
+    expectError(ConfigStoreError.CONFIG_FORMAT) {
+      store.loadSubscriberAutoStartPolicy()
+    }
+
+    configFile().writeText(JSONObject().put("version", 2).put("auto_start", "true").toString())
+    expectError(ConfigStoreError.CONFIG_FORMAT) {
+      store.loadSubscriberAutoStartPolicy()
+    }
+
+    configFile().writeText(JSONObject().put("version", 2).toString())
+    expectError(ConfigStoreError.CONFIG_FORMAT) {
+      store.loadSubscriberAutoStartPolicy()
+    }
+  }
+
+  @Test
+  fun autoStartPolicyUsesTheBoundedConfigReader() {
+    configFile().writeBytes(ByteArray(1024 * 1024 + 1) { 'A'.code.toByte() })
+
+    expectError(ConfigStoreError.CONFIG_FORMAT) {
+      store.loadSubscriberAutoStartPolicy()
+    }
+
+    assertEquals((1024 * 1024 + 1).toLong(), configFile().length())
+    assertFalse(keyExists())
+  }
+
+  @Test
+  fun autoStartPolicyWaitsForAConcurrentConfigWriter() {
+    writeV2Config(emptyAndroidCredential(), autoStart = false)
+    val writerEntered = CountDownLatch(1)
+    val allowWriter = CountDownLatch(1)
+    val blockingWriter = object : ConfigFileWriter {
+      private val delegate = AtomicConfigFileWriter()
+      private var blocked = false
+
+      override fun write(target: File, bytes: ByteArray) {
+        if (!blocked && target.name == "preferences.json") {
+          blocked = true
+          writerEntered.countDown()
+          if (!allowWriter.await(10, TimeUnit.SECONDS)) {
+            throw AssertionError("timed out waiting to release config writer")
+          }
+        }
+        delegate.write(target, bytes)
+      }
+
+      override fun delete(target: File) {
+        delegate.delete(target)
+      }
+    }
+    val writingStore = ConfigStore(root, cipher, blockingWriter)
+    val readingStore = ConfigStore(root, cipher)
+    val executor = Executors.newFixedThreadPool(2)
+    try {
+      val write = executor.submit<PublicConfig> {
+        writingStore.savePublicConfig(
+          samplePublicConfig(password = "", theme = "light").copy(autoStart = true)
+        )
+      }
+      assertTrue(writerEntered.await(10, TimeUnit.SECONDS))
+      val readStarted = CountDownLatch(1)
+      val read = executor.submit<Boolean> {
+        readStarted.countDown()
+        readingStore.loadSubscriberAutoStartPolicy()
+      }
+      assertTrue(readStarted.await(10, TimeUnit.SECONDS))
+
+      assertFalse("policy read escaped the shared storage lock", read.isDone)
+      assertFalse("policy read escaped the shared storage lock", read.completesWithin(250))
+
+      allowWriter.countDown()
+      assertTrue(write.get(30, TimeUnit.SECONDS).autoStart)
+      assertTrue(read.get(30, TimeUnit.SECONDS))
+    } finally {
+      allowWriter.countDown()
+      executor.shutdownNow()
+    }
+  }
+
+  @Test
   fun realKeystoreRoundtripUsesRandomAuthenticatedCiphertext() {
     val password = "密码-'-测试-🔐"
 
@@ -595,6 +772,49 @@ class ConfigStoreInstrumentationTest {
       return error
     }
     throw AssertionError("unreachable")
+  }
+
+  private fun java.util.concurrent.Future<*>.completesWithin(timeoutMillis: Long): Boolean {
+    return try {
+      get(timeoutMillis, TimeUnit.MILLISECONDS)
+      true
+    } catch (_: java.util.concurrent.TimeoutException) {
+      false
+    }
+  }
+
+  private class RejectingCredentialCipher : CredentialCipher {
+    var encryptCalls = 0
+      private set
+    var decryptCalls = 0
+      private set
+
+    override fun encrypt(plaintext: String): CredentialEnvelope {
+      encryptCalls += 1
+      throw AssertionError("boot policy must not encrypt credentials")
+    }
+
+    override fun decrypt(credential: CredentialEnvelope): String {
+      decryptCalls += 1
+      throw AssertionError("boot policy must not decrypt credentials")
+    }
+  }
+
+  private class RejectingConfigFileWriter : ConfigFileWriter {
+    var writeCalls = 0
+      private set
+    var deleteCalls = 0
+      private set
+
+    override fun write(target: File, bytes: ByteArray) {
+      writeCalls += 1
+      throw AssertionError("boot policy must not write configuration files")
+    }
+
+    override fun delete(target: File) {
+      deleteCalls += 1
+      throw AssertionError("boot policy must not delete configuration files")
+    }
   }
 
   companion object {

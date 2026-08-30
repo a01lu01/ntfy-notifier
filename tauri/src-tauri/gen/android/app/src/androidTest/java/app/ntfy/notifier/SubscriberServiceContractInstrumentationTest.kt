@@ -2,16 +2,18 @@ package app.ntfy.notifier
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import java.lang.reflect.Modifier
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.lang.reflect.Modifier
 
 @RunWith(AndroidJUnit4::class)
 class SubscriberServiceContractInstrumentationTest {
@@ -27,13 +29,26 @@ class SubscriberServiceContractInstrumentationTest {
 
     assertEquals("${context.packageName}:subscriber", info.processName)
     assertEquals(0, info.flags and ServiceInfo.FLAG_STOP_WITH_TASK)
+    assertFalse(info.exported)
   }
 
   @Test
-  fun controlActionsAreExplicitAndCarryNoConfiguration() {
+  fun bootReceiverRunsInSubscriberProcessAndIsNotExported() {
+    val info = context.packageManager.getReceiverInfo(
+      ComponentName(context, BootReceiver::class.java),
+      PackageManager.GET_META_DATA
+    )
+
+    assertEquals("${context.packageName}:subscriber", info.processName)
+    assertFalse(info.exported)
+  }
+
+  @Test
+  fun bootAndControlIntentsAreExplicitAndCarryNoSensitiveConfiguration() {
     listOf(
       NotificationService.ACTION_START,
       NotificationService.ACTION_RECONFIGURE,
+      NotificationService.ACTION_BOOT,
       NotificationService.ACTION_STOP
     ).forEach { action ->
       val intent = NotificationService.actionIntent(context, action)
@@ -41,6 +56,31 @@ class SubscriberServiceContractInstrumentationTest {
       assertEquals(NotificationService::class.java.name, intent.component?.className)
       assertTrue(intent.extras == null || intent.extras!!.isEmpty)
     }
+
+    val stickyActivation = NotificationService.actionIntent(
+      context,
+      NotificationService.ACTION_ACTIVATE_STICKY
+    ).putExtra(NotificationService.EXTRA_ACTIVATION_REQUEST, 7L)
+    assertEquals(
+      setOf(NotificationService.EXTRA_ACTIVATION_REQUEST),
+      stickyActivation.extras?.keySet()
+    )
+    assertEquals(7L, stickyActivation.getLongExtra(NotificationService.EXTRA_ACTIVATION_REQUEST, 0L))
+
+    val bootBroadcast = Intent(Intent.ACTION_BOOT_COMPLETED)
+      .setComponent(ComponentName(context, BootReceiver::class.java))
+    assertTrue(bootBroadcast.extras == null || bootBroadcast.extras!!.isEmpty)
+
+    val forbiddenFields = setOf(
+      "server",
+      "topic",
+      "username",
+      "password",
+      "allow_insecure_http",
+      "auto_start",
+      "auto_copy_otp"
+    )
+    assertTrue(stickyActivation.extras!!.keySet().intersect(forbiddenFields).isEmpty())
   }
 
   @Test

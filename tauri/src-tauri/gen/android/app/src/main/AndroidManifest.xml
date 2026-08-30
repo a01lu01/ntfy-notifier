@@ -39,7 +39,8 @@
 
         <receiver
             android:name="app.ntfy.notifier.BootReceiver"
-            android:exported="true">
+            android:exported="false"
+            android:process=":subscriber">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>

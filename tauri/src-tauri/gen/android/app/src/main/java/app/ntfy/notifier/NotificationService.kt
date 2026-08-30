@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import android.widget.Toast
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
@@ -26,6 +27,57 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
+internal enum class StickyActivationDecision {
+  ACTIVATE_STICKY,
+  KEEP_CURRENT_STICKY,
+  STOP_NOT_STICKY
+}
+
+internal class StickyActivationGate {
+  private val pendingRequest = AtomicLong(0)
+
+  fun arm(request: Long): Boolean {
+    if (request <= 0L) return false
+    pendingRequest.set(request)
+    return true
+  }
+
+  fun disarm(request: Long): Boolean = pendingRequest.compareAndSet(request, 0L)
+
+  fun clear() {
+    pendingRequest.set(0L)
+  }
+
+  fun consume(request: Long, eligible: () -> Boolean): Boolean {
+    return request > 0L && pendingRequest.compareAndSet(request, 0L) && eligible()
+  }
+
+  fun decide(
+    request: Long,
+    activationEligible: () -> Boolean,
+    newerSubscriptionActive: () -> Boolean
+  ): StickyActivationDecision {
+    if (consume(request, activationEligible)) {
+      return StickyActivationDecision.ACTIVATE_STICKY
+    }
+    return if (newerSubscriptionActive()) {
+      StickyActivationDecision.KEEP_CURRENT_STICKY
+    } else {
+      StickyActivationDecision.STOP_NOT_STICKY
+    }
+  }
+}
+
+internal class BootRequestGate {
+  private val stickyRequestSeen = AtomicBoolean(false)
+
+  fun markStickyRequest() {
+    stickyRequestSeen.set(true)
+  }
+
+  fun hasStickyRequest(): Boolean = stickyRequestSeen.get()
+}
+
 class NotificationService : Service(), SubscriberEventSink {
 
   companion object {
@@ -34,11 +86,15 @@ class NotificationService : Service(), SubscriberEventSink {
     const val NOTIFICATION_ID_LATEST = 1001
     const val ACTION_START = "app.ntfy.notifier.START"
     const val ACTION_RECONFIGURE = "app.ntfy.notifier.RECONFIGURE"
+    internal const val ACTION_BOOT = "app.ntfy.notifier.BOOT"
+    internal const val ACTION_ACTIVATE_STICKY = "app.ntfy.notifier.ACTIVATE_STICKY"
     const val ACTION_COPY_OTP = "app.ntfy.notifier.COPY_OTP"
     const val ACTION_STOP = "app.ntfy.notifier.STOP"
     const val EXTRA_OTP = "otp"
-    const val PREFS = "ntfy_notifier"
-    const val PREF_AUTO_START = "auto_start"
+    internal const val EXTRA_ACTIVATION_REQUEST = "activation_request"
+
+    private const val LOG_TAG = "NtfySubscriber"
+    private const val ERROR_STICKY_ACTIVATION = "STICKY_ACTIVATION_FAILED"
 
     internal const val STATE_CONNECTING = "connecting"
     internal const val STATE_CONNECTED = "connected"
@@ -53,18 +109,6 @@ class NotificationService : Service(), SubscriberEventSink {
       STATE_CONFIGURATION_ERROR,
       STATE_STOPPED
     )
-
-    fun setAutoStart(context: Context, enabled: Boolean): Boolean {
-      return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        .edit()
-        .putBoolean(PREF_AUTO_START, enabled)
-        .commit()
-    }
-
-    fun autoStart(context: Context): Boolean {
-      return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        .getBoolean(PREF_AUTO_START, false)
-    }
 
     internal fun actionIntent(context: Context, action: String): Intent {
       return Intent(context, NotificationService::class.java).setAction(action)
@@ -83,6 +127,9 @@ class NotificationService : Service(), SubscriberEventSink {
   private val callbacksEnabled = AtomicBoolean(false)
   private val nativeActive = AtomicBoolean(false)
   private val nextAlertId = AtomicInteger(2000)
+  private val stickyActivation = StickyActivationGate()
+  private val bootRequestGate = BootRequestGate()
+  private val stopRequested = AtomicBoolean(false)
 
   @Volatile
   private var destroyed = false
@@ -116,26 +163,57 @@ class NotificationService : Service(), SubscriberEventSink {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    when (intent?.action) {
+    return when (intent?.action) {
       ACTION_COPY_OTP -> {
+        stopRequested.set(false)
+        bootRequestGate.markStickyRequest()
         intent.getStringExtra(EXTRA_OTP)
           ?.takeIf { it.isNotBlank() && it.length <= 128 }
           ?.let(::copyOtpToClipboard)
         requestSubscription()
+        START_STICKY
       }
       ACTION_STOP -> {
+        stopRequested.set(true)
         requestStop(startId)
-        return START_NOT_STICKY
+        START_NOT_STICKY
       }
-      ACTION_START, ACTION_RECONFIGURE, null -> requestSubscription()
-      else -> requestSubscription()
+      ACTION_BOOT -> {
+        // BootReceiver may have read auto_start before a later Activity save/reconfigure. Any
+        // sticky request already accepted by this Service is newer authority and must win.
+        when {
+          stopRequested.get() -> {
+            stopSelfResult(startId)
+            START_NOT_STICKY
+          }
+          bootRequestGate.hasStickyRequest() -> START_STICKY
+          else -> {
+            requestSubscription(bootStartId = startId)
+            START_NOT_STICKY
+          }
+        }
+      }
+      ACTION_ACTIVATE_STICKY -> activateSticky(intent, startId)
+      ACTION_START, ACTION_RECONFIGURE, null -> {
+        stopRequested.set(false)
+        bootRequestGate.markStickyRequest()
+        requestSubscription()
+        START_STICKY
+      }
+      else -> {
+        stopRequested.set(false)
+        bootRequestGate.markStickyRequest()
+        requestSubscription()
+        START_STICKY
+      }
     }
-    return START_STICKY
   }
 
   override fun onDestroy() {
     destroyed = true
+    stopRequested.set(true)
     requestGeneration.incrementAndGet()
+    stickyActivation.clear()
     callbacksEnabled.set(false)
     nativeActive.set(false)
     if (SubscriberProcessControl.release(ownerLease)) {
@@ -201,8 +279,9 @@ class NotificationService : Service(), SubscriberEventSink {
     }
   }
 
-  private fun requestSubscription() {
+  private fun requestSubscription(bootStartId: Int? = null) {
     val request = requestGeneration.incrementAndGet()
+    stickyActivation.clear()
     try {
       subscriptionExecutor.execute {
         val config = try {
@@ -213,6 +292,11 @@ class NotificationService : Service(), SubscriberEventSink {
         }
         if (!requestIsCurrent(request)) return@execute
 
+        if (bootStartId != null && !config.autoStart) {
+          stopDisabledBoot(request, bootStartId)
+          return@execute
+        }
+
         currentAutoCopyOtp = config.autoCopyOtp
         val connection = config.toNativeSubscriptionConfig()
         if (connection.server.isBlank() || connection.topic.isBlank()) {
@@ -221,6 +305,7 @@ class NotificationService : Service(), SubscriberEventSink {
         }
 
         if (nativeActive.get() && currentConnection == connection) {
+          if (bootStartId != null) activateStickyAfterBoot(request)
           return@execute
         }
 
@@ -274,6 +359,7 @@ class NotificationService : Service(), SubscriberEventSink {
         if (started) {
           currentConnection = connection
           nativeActive.set(true)
+          if (bootStartId != null) activateStickyAfterBoot(request)
         } else {
           callbacksEnabled.set(false)
           nativeActive.set(false)
@@ -287,9 +373,78 @@ class NotificationService : Service(), SubscriberEventSink {
     }
   }
 
+  private fun stopDisabledBoot(request: Long, startId: Int) {
+    if (!requestIsCurrent(request)) return
+    val session = issueSession()
+    stickyActivation.clear()
+    callbacksEnabled.set(false)
+    nativeActive.set(false)
+    currentConnection = null
+    currentAutoCopyOtp = false
+    stopNativeSafely()
+    mainHandler.post {
+      if (
+        !requestIsCurrent(request) ||
+        currentServiceSession.get() != session ||
+        !sessions.isCurrent(session)
+      ) {
+        return@post
+      }
+      currentState = STATE_STOPPED
+      ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+      stopSelfResult(startId)
+    }
+  }
+
+  private fun activateStickyAfterBoot(request: Long) {
+    if (!requestIsCurrent(request) || !nativeActive.get()) return
+    if (!stickyActivation.arm(request)) return
+    if (!requestIsCurrent(request) || !nativeActive.get()) {
+      stickyActivation.disarm(request)
+      return
+    }
+    val activation = actionIntent(this, ACTION_ACTIVATE_STICKY)
+      .putExtra(EXTRA_ACTIVATION_REQUEST, request)
+    try {
+      ContextCompat.startForegroundService(this, activation)
+    } catch (_: RuntimeException) {
+      stickyActivation.disarm(request)
+      Log.e(LOG_TAG, ERROR_STICKY_ACTIVATION)
+    }
+  }
+
+  private fun activateSticky(intent: Intent, startId: Int): Int {
+    val request = intent.getLongExtra(EXTRA_ACTIVATION_REQUEST, 0L)
+    return when (stickyActivation.decide(
+      request = request,
+      activationEligible = {
+        requestIsCurrent(request) && nativeActive.get()
+      },
+      newerSubscriptionActive = {
+        !destroyed &&
+          SubscriberProcessControl.isOwner(ownerLease) &&
+          !stopRequested.get() &&
+          (bootRequestGate.hasStickyRequest() || nativeActive.get())
+      }
+    )) {
+      StickyActivationDecision.ACTIVATE_STICKY,
+      StickyActivationDecision.KEEP_CURRENT_STICKY -> {
+        bootRequestGate.markStickyRequest()
+        START_STICKY
+      }
+      StickyActivationDecision.STOP_NOT_STICKY -> {
+        // A delayed activation after ACTION_STOP must never make the stopped service sticky again.
+        stickyActivation.clear()
+        stopSelfResult(startId)
+        START_NOT_STICKY
+      }
+    }
+  }
+
   private fun failConfiguration(request: Long) {
     if (!requestIsCurrent(request)) return
     val session = issueSession()
+    stickyActivation.clear()
     callbacksEnabled.set(false)
     nativeActive.set(false)
     currentConnection = null
@@ -301,6 +456,7 @@ class NotificationService : Service(), SubscriberEventSink {
   private fun requestStop(startId: Int) {
     if (destroyed || !SubscriberProcessControl.isOwner(ownerLease)) return
     val request = requestGeneration.incrementAndGet()
+    stickyActivation.clear()
     val session = issueSession()
     callbacksEnabled.set(false)
     nativeActive.set(false)

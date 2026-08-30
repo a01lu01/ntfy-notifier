@@ -140,6 +140,27 @@ class ConfigStore internal constructor(
     )
   }
 
+  /**
+   * Reads only the non-secret policy needed by BootReceiver. This deliberately avoids the normal
+   * public-config path: boot policy checks must not touch preferences, migrate configuration, or
+   * access Android Keystore before the foreground service has been promoted.
+   */
+  fun loadSubscriberAutoStartPolicy(): Boolean = withStorageLock {
+    val original = readOptionalFile(configFile, "读取开机订阅策略失败")
+      ?: return@withStorageLock false
+    val root = parseJsonObject(original, "开机订阅策略格式无效")
+    if (root.has("version")) {
+      val version = requireLong(root, "version")
+      if (version != CONFIG_VERSION) {
+        throw ConfigStoreException(
+          ConfigStoreError.CONFIG_VERSION,
+          "不支持的配置版本"
+        )
+      }
+    }
+    requireBoolean(root, "auto_start")
+  }
+
   private fun loadPublicConfigLocked(): PublicConfig {
     // Preferences are in Android's backup allowlist. Validate or sanitize them before touching
     // the sensitive config so malformed config/credential failures cannot leave arbitrary backup
