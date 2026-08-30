@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.widget.Toast
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import androidx.core.app.ServiceCompat
@@ -71,9 +72,9 @@ class NotificationService : Service() {
   override fun onCreate() {
     super.onCreate()
     instance = this
-    // 清掉旧版本残留通知，避免系统继续展示旧图标
-    getSystemService(NotificationManager::class.java).cancelAll()
-    createChannels()
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      createChannels()
+    }
     refreshLatest()
   }
 
@@ -100,6 +101,7 @@ class NotificationService : Service() {
 
   override fun onBind(intent: Intent?): IBinder? = null
 
+  @RequiresApi(Build.VERSION_CODES.O)
   private fun createChannels() {
     val nm = getSystemService(NotificationManager::class.java)
     val latest = NotificationChannel(CHANNEL_LATEST, "最新推送", NotificationManager.IMPORTANCE_LOW)
