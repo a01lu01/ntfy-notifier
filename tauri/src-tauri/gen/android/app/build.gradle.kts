@@ -1,9 +1,25 @@
+import com.android.build.api.instrumentation.FramesComputationMode
+import com.android.build.api.instrumentation.InstrumentationScope
 import java.util.Properties
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("rust")
+}
+
+val jacksonApi24CompatVersion = "2.15.3"
+configurations.configureEach {
+    incoming.afterResolve {
+        val resolvedJacksonVersions = resolutionResult.allComponents
+            .mapNotNull { it.moduleVersion }
+            .filter { it.group == "com.fasterxml.jackson.core" }
+            .associate { it.name to it.version }
+        check(resolvedJacksonVersions.values.all { it == jacksonApi24CompatVersion }) {
+            "Jackson API 24 compatibility was validated only for $jacksonApi24CompatVersion, " +
+                "but this configuration resolved $resolvedJacksonVersions; review the ASM transform"
+        }
+    }
 }
 
 val tauriProperties = Properties().apply {
@@ -48,6 +64,16 @@ android {
     }
 }
 
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.instrumentation.transformClassesWith(
+            JacksonApi24CompatVisitorFactory::class.java,
+            InstrumentationScope.ALL,
+        ) {}
+        variant.instrumentation.setAsmFramesComputationMode(FramesComputationMode.COPY_FRAMES)
+    }
+}
+
 rust {
     rootDirRel = "../../../"
 }
@@ -59,6 +85,9 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-process:2.10.0")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation(
+        "com.fasterxml.jackson.core:jackson-databind:$jacksonApi24CompatVersion"
+    )
     androidTestImplementation("androidx.test.ext:junit:1.1.4")
     androidTestImplementation("androidx.test:runner:1.5.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")

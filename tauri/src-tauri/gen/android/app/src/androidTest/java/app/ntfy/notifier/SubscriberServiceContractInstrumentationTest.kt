@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.fasterxml.jackson.databind.ObjectMapper
 import java.lang.reflect.Modifier
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -18,6 +19,29 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class SubscriberServiceContractInstrumentationTest {
   private val context: Context = ApplicationProvider.getApplicationContext()
+
+  @Test
+  fun jacksonRuntimeCanInitializeAndIntrospectOnApi24() {
+    assertFalse(JacksonApi24Compat.isBootstrapMethodError(null))
+    assertFalse(
+      JacksonApi24Compat.isBootstrapMethodError(
+        NoClassDefFoundError("an optional API is unavailable")
+      )
+    )
+
+    val mapper = ObjectMapper()
+
+    assertEquals("2.15.3", mapper.version().toString())
+    assertEquals("2.15.3", mapper.factory.version().toString())
+    assertEquals(
+      "api24",
+      mapper.readValue("{\"runtime\":\"api24\"}", Api24Payload::class.java).runtime
+    )
+  }
+
+  class Api24Payload {
+    var runtime: String = ""
+  }
 
   @Suppress("DEPRECATION")
   @Test
