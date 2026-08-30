@@ -140,7 +140,7 @@ jobs:
       - name: Install pinned Rust Android targets
         run: >-
           rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
-          --target aarch64-linux-android
+          --target aarch64-linux-android --target x86_64-linux-android
       - name: Select pinned Rust toolchain
         run: rustup default ${{ env.RUST_TOOLCHAIN }}
       - name: Select Android NDK
@@ -162,6 +162,29 @@ jobs:
           export AR_aarch64_linux_android="$ndk_bin/llvm-ar"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ndk_bin/aarch64-linux-android24-clang"
           cargo check --target aarch64-linux-android --no-default-features --locked
+      - name: Build and verify the API 24 subscriber JNI library
+        working-directory: tauri/src-tauri
+        env:
+          TAURI_ANDROID_PROJECT_PATH: ${{ github.workspace }}/tauri/src-tauri/gen/android
+          TAURI_ANDROID_PACKAGE_UNESCAPED: com.why.ntfy_notifier
+          WRY_ANDROID_PACKAGE: com.why.ntfy_notifier
+          WRY_ANDROID_LIBRARY: ntfy_notifier_lib
+          WRY_ANDROID_KOTLIN_FILES_OUT_DIR: ${{ github.workspace }}/tauri/src-tauri/gen/android/app/src/main/java/com/why/ntfy_notifier/generated
+        run: |
+          ndk_bin="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_x86_64_linux_android="$ndk_bin/x86_64-linux-android24-clang"
+          export AR_x86_64_linux_android="$ndk_bin/llvm-ar"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ndk_bin/x86_64-linux-android24-clang"
+          cargo build --target x86_64-linux-android --no-default-features --locked
+          jni_dir="${{ github.workspace }}/tauri/src-tauri/gen/android/app/src/main/jniLibs/x86_64"
+          mkdir -p "$jni_dir"
+          cp target/x86_64-linux-android/debug/libntfy_notifier_lib.so "$jni_dir/"
+          "$ndk_bin/llvm-nm" -D --defined-only "$jni_dir/libntfy_notifier_lib.so" \
+            | grep -F "Java_app_ntfy_notifier_NativeSubscriber_nativeStart"
+          "$ndk_bin/llvm-nm" -D --defined-only "$jni_dir/libntfy_notifier_lib.so" \
+            | grep -F "Java_app_ntfy_notifier_NativeSubscriber_nativeReconfigure"
+          "$ndk_bin/llvm-nm" -D --defined-only "$jni_dir/libntfy_notifier_lib.so" \
+            | grep -F "Java_app_ntfy_notifier_NativeSubscriber_nativeStop"
       - name: Run Android lint and debug compile
         run: >-
           ./gradlew --no-daemon --stacktrace lintUniversalDebug
@@ -199,6 +222,7 @@ jobs:
       - name: Run API 24 Android instrumentation tests
         run: >-
           ./gradlew --no-daemon --stacktrace connectedUniversalDebugAndroidTest
+          -Pandroid.testInstrumentationRunnerArguments.ntfySubscriberIntegration=true
           -x rustBuildUniversalDebug -x rustBuildArm64Debug -x rustBuildArmDebug
           -x rustBuildX86Debug -x rustBuildX86_64Debug
       - name: Show emulator diagnostics after failure

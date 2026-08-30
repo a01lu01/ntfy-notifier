@@ -23,6 +23,7 @@ import {
   resolveTheme,
   restoreSettingsState
 } from "./settings-model.js";
+import { createHistoryPoller, createLatestRefresh } from "./history-poller.js";
 
 const PAGES = [
   { id: "push", label: "推送" },
@@ -40,6 +41,11 @@ let editingId = null;
 let isMobile = false;
 let appVersion = "";
 let configLoadFailed = false;
+let historyPoller = null;
+const pushRefresh = createLatestRefresh({
+  load: () => invoke("get_messages"),
+  apply: renderPushMessages
+});
 
 const COLUMNS = [
   { id: "time", title: "时间" },
@@ -90,9 +96,10 @@ function switchPage(id) {
     const item = document.querySelector(`.nav-item[data-page="${page.id}"]`);
     item.classList.toggle("active", page.id === id);
   }
-  if (id === "push") refreshPush();
+  if (id === "push" && !historyPoller) refreshPush();
   if (id === "rules") refreshRules();
   if (id === "settings") fillSettings();
+  historyPoller?.sync();
 }
 
 function applyTheme() {
@@ -106,7 +113,10 @@ function applyTheme() {
 /* ---------- 推送页 ---------- */
 
 async function refreshPush() {
-  const messages = await invoke("get_messages");
+  return pushRefresh.run();
+}
+
+function renderPushMessages(messages) {
   const table = el("push-table");
   const tbody = table.querySelector("tbody");
   tbody.innerHTML = "";
@@ -153,8 +163,9 @@ function buildPushPage() {
   el("btn-refresh").addEventListener("click", refreshPush);
   el("btn-clear").addEventListener("click", async () => {
     if (await confirmBox("确定清空全部推送历史？此操作不可恢复。", "清空历史")) {
+      pushRefresh.invalidate();
       await invoke("clear_history");
-      refreshPush();
+      await refreshPush();
     }
   });
   const order = uiState?.column_order || COLUMNS.map((c) => c.id);
@@ -647,12 +658,25 @@ async function init() {
   buildRulesPage();
   buildSettingsPage();
   buildAboutPage();
+  if (isMobile) {
+    historyPoller = createHistoryPoller({
+      isActive: () => currentPage === "push" && document.visibilityState === "visible",
+      readRevision: () => invoke("get_history_revision"),
+      refresh: refreshPush,
+      reportError: (error) => console.error("history revision poll failed", error)
+    });
+    document.addEventListener("visibilitychange", () => historyPoller.sync());
+  }
   switchPage("push");
 
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
 
   await listen("navigate", (e) => switchPage(e.payload));
-  await listen("history-updated", () => { if (currentPage === "push") refreshPush(); });
+  if (isMobile) {
+    historyPoller.start();
+  } else {
+    await listen("history-updated", () => { if (currentPage === "push") refreshPush(); });
+  }
 
   if (configLoadError != null) {
     await alertBox(

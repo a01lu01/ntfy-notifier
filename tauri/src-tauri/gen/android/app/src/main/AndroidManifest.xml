@@ -29,7 +29,9 @@
         <service
             android:name="app.ntfy.notifier.NotificationService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse"
+            android:process=":subscriber"
+            android:stopWithTask="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Continuous user-configured ntfy SSE subscription and notification delivery" />

@@ -1,7 +1,5 @@
 use crate::config::Config;
-#[cfg(mobile)]
-use crate::notify_mobile;
-#[cfg(any(target_os = "windows", mobile))]
+#[cfg(target_os = "windows")]
 use crate::rules;
 use crate::subscription::{
     SubscriptionConfig, SubscriptionController, SubscriptionCore, SubscriptionMessage,
@@ -27,7 +25,7 @@ impl NtfyManager {
     pub fn restart(&self, config: Config, app: AppHandle) {
         let sink = TauriSink {
             app,
-            #[cfg(any(target_os = "windows", mobile))]
+            #[cfg(target_os = "windows")]
             config: config.clone(),
         };
         self.controller.reconfigure(
@@ -53,7 +51,7 @@ impl Drop for NtfyManager {
 
 struct TauriSink {
     app: AppHandle,
-    #[cfg(any(target_os = "windows", mobile))]
+    #[cfg(target_os = "windows")]
     config: Config,
 }
 
@@ -67,7 +65,7 @@ impl SubscriptionSink for TauriSink {
     }
 
     fn message_received(&self, message: SubscriptionMessage) -> Result<(), String> {
-        #[cfg(not(any(target_os = "windows", mobile)))]
+        #[cfg(not(target_os = "windows"))]
         let _ = &message;
 
         #[cfg(target_os = "windows")]
@@ -87,25 +85,6 @@ impl SubscriptionSink for TauriSink {
             let title = windows_notification_preview(&message.title, 128);
             let body = windows_notification_preview(&message.message, 512);
             notify::show(&title, &body, "ntfy-Notifier");
-        }
-
-        #[cfg(mobile)]
-        {
-            let otp = rules::find_otp(&message.message, &rules::load());
-            notify_mobile::update_notifications(
-                &self.app,
-                &message.title,
-                &message.message,
-                otp.as_deref(),
-            );
-            if self.config.auto_copy_otp {
-                if let Some(otp) = otp {
-                    let app = self.app.clone();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        notify_mobile::copy_to_clipboard(&app, &otp);
-                    });
-                }
-            }
         }
 
         let _ = self.app.emit("history-updated", ());

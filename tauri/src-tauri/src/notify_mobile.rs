@@ -5,7 +5,7 @@ use tauri::{
     AppHandle, Manager, Runtime,
 };
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct MobileConfigDto {
     server: String,
@@ -16,6 +16,12 @@ struct MobileConfigDto {
     auto_start: bool,
     auto_copy_otp: bool,
     allow_insecure_http: bool,
+}
+
+impl std::fmt::Debug for MobileConfigDto {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("MobileConfigDto(<redacted>)")
+    }
 }
 
 impl From<&crate::config::Config> for MobileConfigDto {
@@ -82,45 +88,26 @@ impl<R: Runtime> NotifyMobile<R> {
         Ok(response.into())
     }
 
-    pub fn start_service(&self) {
-        let _: Result<(), _> = self.0.run_mobile_plugin("startService", ());
+    pub fn start_service(&self) -> Result<(), String> {
+        self.0
+            .run_mobile_plugin("startService", ())
+            .map_err(|error| format!("启动 Android 订阅服务失败：{error}"))
     }
 
-    pub fn set_auto_start(&self, enabled: bool) {
+    pub fn reconfigure_service(&self) -> Result<(), String> {
+        self.0
+            .run_mobile_plugin("reconfigureService", ())
+            .map_err(|error| format!("重配置 Android 订阅服务失败：{error}"))
+    }
+
+    pub fn set_auto_start(&self, enabled: bool) -> Result<(), String> {
         #[derive(Serialize)]
         struct Payload {
             enabled: bool,
         }
-        let _: Result<(), _> = self
-            .0
-            .run_mobile_plugin("setAutoStart", Payload { enabled });
-    }
-
-    pub fn update_notifications(&self, title: &str, message: &str, otp: Option<&str>) {
-        #[derive(Serialize)]
-        struct Payload<'a> {
-            title: &'a str,
-            message: &'a str,
-            otp: Option<&'a str>,
-        }
-        let _: Result<(), _> = self.0.run_mobile_plugin(
-            "updateNotifications",
-            Payload {
-                title,
-                message,
-                otp,
-            },
-        );
-    }
-
-    pub fn copy_to_clipboard(&self, text: &str) {
-        #[derive(Serialize)]
-        struct Payload<'a> {
-            text: &'a str,
-        }
-        let _: Result<(), _> = self
-            .0
-            .run_mobile_plugin("copyToClipboard", Payload { text });
+        self.0
+            .run_mobile_plugin("setAutoStart", Payload { enabled })
+            .map_err(|error| format!("更新 Android 开机订阅兼容状态失败：{error}"))
     }
 }
 
@@ -141,10 +128,17 @@ fn state<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::State<'_, NotifyMobile
 }
 
 #[cfg(mobile)]
-pub fn start_service(app: &AppHandle) {
-    if let Some(s) = state(app) {
-        s.start_service();
-    }
+pub fn start_service(app: &AppHandle) -> Result<(), String> {
+    state(app)
+        .ok_or_else(|| "Android 通知插件尚未初始化".to_string())?
+        .start_service()
+}
+
+#[cfg(mobile)]
+pub fn reconfigure_service(app: &AppHandle) -> Result<(), String> {
+    state(app)
+        .ok_or_else(|| "Android 通知插件尚未初始化".to_string())?
+        .reconfigure_service()
 }
 
 #[cfg(mobile)]
@@ -165,24 +159,10 @@ pub fn save_config(
 }
 
 #[cfg(mobile)]
-pub fn set_auto_start(app: &AppHandle, enabled: bool) {
-    if let Some(s) = state(app) {
-        s.set_auto_start(enabled);
-    }
-}
-
-#[cfg(mobile)]
-pub fn update_notifications(app: &AppHandle, title: &str, message: &str, otp: Option<&str>) {
-    if let Some(s) = state(app) {
-        s.update_notifications(title, message, otp);
-    }
-}
-
-#[cfg(mobile)]
-pub fn copy_to_clipboard(app: &AppHandle, text: &str) {
-    if let Some(s) = state(app) {
-        s.copy_to_clipboard(text);
-    }
+pub fn set_auto_start(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    state(app)
+        .ok_or_else(|| "Android 通知插件尚未初始化".to_string())?
+        .set_auto_start(enabled)
 }
 
 #[cfg(test)]
@@ -211,6 +191,16 @@ mod tests {
         let error = serde_json::from_value::<MobileConfigDto>(value).unwrap_err();
 
         assert!(error.to_string().contains("missing field `password`"));
+    }
+
+    #[test]
+    fn mobile_config_debug_output_is_redacted() {
+        let dto = serde_json::from_value::<MobileConfigDto>(response_json()).unwrap();
+        let debug = format!("{dto:?}");
+
+        assert_eq!(debug, "MobileConfigDto(<redacted>)");
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("ntfy.example.com"));
     }
 
     #[test]

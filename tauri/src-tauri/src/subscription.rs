@@ -20,13 +20,19 @@ const MAX_NTFY_JSON_BYTES: usize = MAX_EVENT_BYTES;
 pub(crate) const MAX_TITLE_BYTES: usize = 1024;
 pub(crate) const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct SubscriptionConfig {
     pub server: String,
     pub username: String,
     pub password: String,
     pub topic: String,
     pub allow_insecure_http: bool,
+}
+
+impl std::fmt::Debug for SubscriptionConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SubscriptionConfig(<redacted>)")
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -47,13 +53,19 @@ impl From<&Config> for SubscriptionConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ValidatedSubscriptionConfig {
     endpoint: ValidatedEndpoint,
     key: SubscriptionKey,
     username: String,
     password: String,
     allow_insecure_http: bool,
+}
+
+impl std::fmt::Debug for ValidatedSubscriptionConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ValidatedSubscriptionConfig(<redacted>)")
+    }
 }
 
 impl TryFrom<SubscriptionConfig> for ValidatedSubscriptionConfig {
@@ -93,6 +105,19 @@ pub(crate) enum SubscriptionState {
     Retrying,
     ConfigurationError,
     Stopped,
+}
+
+impl SubscriptionState {
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Retrying => "retrying",
+            Self::ConfigurationError => "configuration_error",
+            Self::Stopped => "stopped",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -453,6 +478,7 @@ impl SubscriptionCore {
 struct ActiveSubscription {
     cancellation: CancellationToken,
     sink: Arc<dyn SubscriptionSink>,
+    finished: oneshot::Receiver<()>,
 }
 
 enum StateDelivery {
@@ -470,6 +496,7 @@ enum StateDelivery {
 
 struct ControllerState {
     active: Option<ActiveSubscription>,
+    finishing: Option<oneshot::Receiver<()>>,
     receiver: Option<mpsc::UnboundedReceiver<StateDelivery>>,
 }
 
@@ -487,6 +514,7 @@ impl Default for SubscriptionController {
         Self {
             control: Mutex::new(ControllerState {
                 active: None,
+                finishing: None,
                 receiver: Some(receiver),
             }),
             generation: Arc::new(AtomicU64::new(0)),
@@ -517,16 +545,21 @@ impl SubscriptionController {
                 .generation
                 .fetch_add(1, Ordering::SeqCst)
                 .wrapping_add(1);
-            if let Some(old) = control.active.take() {
+            let previous_finished = if let Some(old) = control.active.take() {
                 old.cancellation.cancel();
                 let _ = self.state_sender.send(StateDelivery::Forced {
                     state: SubscriptionState::Stopped,
                     sink: old.sink,
                 });
-            }
+                Some(old.finished)
+            } else {
+                control.finishing.take()
+            };
+            let (finished_sender, finished) = oneshot::channel();
             control.active = Some(ActiveSubscription {
                 cancellation: cancellation.clone(),
                 sink: Arc::clone(&sink),
+                finished,
             });
             let context = RunContext {
                 generation,
@@ -546,7 +579,17 @@ impl SubscriptionController {
                 )
             });
             let worker = Box::pin(async move {
-                core.run(config, context).await;
+                // Cancellation makes the previous generation stale immediately, but the
+                // underlying HTTP stream is not guaranteed to be dropped until its worker has
+                // actually returned. Chaining workers through their completion signals prevents
+                // even a transient second SSE connection during rapid A -> B -> C changes.
+                if let Some(previous_finished) = previous_finished {
+                    let _ = previous_finished.await;
+                }
+                if !context.is_cancelled_or_stale() {
+                    core.run(config, context).await;
+                }
+                let _ = finished_sender.send(());
             }) as BoxFuture<'static, ()>;
             (dispatcher, worker)
         };
@@ -562,6 +605,7 @@ impl SubscriptionController {
         self.generation.fetch_add(1, Ordering::SeqCst);
         if let Some(active) = control.active.take() {
             active.cancellation.cancel();
+            control.finishing = Some(active.finished);
             let _ = self.state_sender.send(StateDelivery::Forced {
                 state: SubscriptionState::Stopped,
                 sink: active.sink,
@@ -785,6 +829,8 @@ mod tests {
     struct MockSource {
         plans: Mutex<VecDeque<ConnectPlan>>,
         attempts: Mutex<Vec<ConnectAttempt>>,
+        active_streams: Arc<AtomicUsize>,
+        maximum_active_streams: Arc<AtomicUsize>,
         changed: Notify,
     }
 
@@ -798,6 +844,14 @@ mod tests {
 
         fn attempts(&self) -> Vec<ConnectAttempt> {
             self.attempts.lock().unwrap().clone()
+        }
+
+        fn active_streams(&self) -> usize {
+            self.active_streams.load(Ordering::SeqCst)
+        }
+
+        fn maximum_active_streams(&self) -> usize {
+            self.maximum_active_streams.load(Ordering::SeqCst)
         }
 
         async fn wait_for_attempts(&self, expected: usize) {
@@ -817,6 +871,8 @@ mod tests {
                 .push(ConnectAttempt { config, since });
             self.changed.notify_waiters();
             let plan = self.plans.lock().unwrap().pop_front();
+            let active_streams = Arc::clone(&self.active_streams);
+            let maximum_active_streams = Arc::clone(&self.maximum_active_streams);
             Box::pin(async move {
                 match plan {
                     Some(ConnectPlan::Fail(error)) => Err(error.to_string()),
@@ -827,11 +883,38 @@ mod tests {
                         let stream = stream::unfold(receiver, |mut receiver| async move {
                             receiver.recv().await.map(|item| (item, receiver))
                         });
-                        Ok(Box::pin(stream) as SubscriptionStream)
+                        let active = active_streams.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum_active_streams.fetch_max(active, Ordering::SeqCst);
+                        Ok(Box::pin(TrackedSubscriptionStream {
+                            inner: Box::pin(stream),
+                            active_streams,
+                        }) as SubscriptionStream)
                     }
                     None => Err("no mock connection plan".to_string()),
                 }
             })
+        }
+    }
+
+    struct TrackedSubscriptionStream {
+        inner: SubscriptionStream,
+        active_streams: Arc<AtomicUsize>,
+    }
+
+    impl Stream for TrackedSubscriptionStream {
+        type Item = Result<Vec<u8>, String>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.inner.as_mut().poll_next(context)
+        }
+    }
+
+    impl Drop for TrackedSubscriptionStream {
+        fn drop(&mut self) {
+            self.active_streams.fetch_sub(1, Ordering::SeqCst);
         }
     }
 
@@ -1111,6 +1194,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn subscription_debug_output_redacts_credentials_and_endpoint() {
+        let mut raw = config("https://ntfy.example.com");
+        raw.username = "alice".to_string();
+        raw.password = "secret".to_string();
+        let raw_debug = format!("{raw:?}");
+        let validated_debug = format!("{:?}", ValidatedSubscriptionConfig::try_from(raw).unwrap());
+
+        assert_eq!(raw_debug, "SubscriptionConfig(<redacted>)");
+        assert_eq!(validated_debug, "ValidatedSubscriptionConfig(<redacted>)");
+        assert!(!validated_debug.contains("secret"));
+        assert!(!validated_debug.contains("ntfy.example.com"));
+    }
+
     fn key(server: &str) -> SubscriptionKey {
         ValidatedSubscriptionConfig::try_from(config(server))
             .unwrap()
@@ -1160,6 +1257,18 @@ mod tests {
             handles.push(tokio::spawn(task));
         });
         handles.pop().expect("subscription worker was not spawned")
+    }
+
+    #[test]
+    fn subscription_states_have_stable_android_callback_names() {
+        assert_eq!(SubscriptionState::Connecting.as_str(), "connecting");
+        assert_eq!(SubscriptionState::Connected.as_str(), "connected");
+        assert_eq!(SubscriptionState::Retrying.as_str(), "retrying");
+        assert_eq!(
+            SubscriptionState::ConfigurationError.as_str(),
+            "configuration_error"
+        );
+        assert_eq!(SubscriptionState::Stopped.as_str(), "stopped");
     }
 
     #[tokio::test]
@@ -1349,6 +1458,68 @@ mod tests {
             .wait_for_state(SubscriptionState::Stopped)
             .await;
         current_task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rapid_reconfigure_waits_for_the_previous_stream_to_fully_exit() {
+        let (first_sender, first_plan) = channel_plan();
+        let (_final_sender, final_plan) = channel_plan();
+        let source = MockSource::with_plans([first_plan, final_plan]);
+        let controller = SubscriptionController::default();
+        let blocking_sink = Arc::new(BlockingMessageSink::default());
+
+        let first_task = spawn_subscription(
+            &controller,
+            core(Arc::clone(&source)),
+            config("https://first.example"),
+            Arc::clone(&blocking_sink),
+        );
+        source.wait_for_attempts(1).await;
+        send(
+            &first_sender,
+            "data: {\"id\":\"blockedmsg01\",\"event\":\"message\",\"topic\":\"test-topic\",\"message\":\"hello\"}\n\n",
+        );
+        blocking_sink.wait_until_entered().await;
+
+        let middle_task = spawn_subscription(
+            &controller,
+            core(Arc::clone(&source)),
+            config("https://middle.example"),
+            Arc::new(RecordingSink::default()),
+        );
+        let final_sink = Arc::new(RecordingSink::default());
+        let final_task = spawn_subscription(
+            &controller,
+            core(Arc::clone(&source)),
+            config("https://final.example"),
+            Arc::clone(&final_sink),
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(source.attempts().len(), 1);
+        assert_eq!(source.active_streams(), 1);
+        assert_eq!(source.maximum_active_streams(), 1);
+
+        blocking_sink.release();
+        source.wait_for_attempts(2).await;
+        assert_eq!(source.attempts().len(), 2);
+        assert_eq!(
+            source.attempts()[1].config.endpoint.server.as_str(),
+            "https://final.example/"
+        );
+        assert_eq!(source.active_streams(), 1);
+        assert_eq!(source.maximum_active_streams(), 1);
+
+        controller.stop();
+        final_sink.wait_for_state(SubscriptionState::Stopped).await;
+        for task in [first_task, middle_task, final_task] {
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(source.active_streams(), 0);
+        assert_eq!(source.maximum_active_streams(), 1);
     }
 
     #[tokio::test]
@@ -1822,7 +1993,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn blocking_old_sink_does_not_block_new_generation_commit() {
+    async fn blocking_old_sink_delays_reconnect_but_preserves_its_committed_cursor() {
         let (old_sender, old_plan) = channel_plan();
         let (new_sender, new_plan) = channel_plan();
         let source = MockSource::with_plans([old_plan, new_plan]);
@@ -1852,8 +2023,16 @@ mod tests {
             config("https://example.test"),
             Arc::clone(&new_sink),
         );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(source.attempts().len(), 1);
+        assert_eq!(source.active_streams(), 1);
+        assert_eq!(source.maximum_active_streams(), 1);
+
+        old_sink.release();
         source.wait_for_attempts(2).await;
         assert_eq!(source.attempts()[1].since.as_deref(), Some(CURSOR_1));
+        assert_eq!(source.active_streams(), 1);
+        assert_eq!(source.maximum_active_streams(), 1);
         send(&new_sender, "data: {\"event\":\"open\"}\n\n");
         send(
             &new_sender,
@@ -1870,11 +2049,10 @@ mod tests {
             }
         })
         .await;
-        old_sink.release();
 
         assert!(
             delivered.is_ok(),
-            "new generation was blocked by the old platform callback"
+            "new generation did not resume after the old callback returned"
         );
         assert_eq!(
             store.cursor(&subscription_key).as_deref(),
@@ -1884,6 +2062,8 @@ mod tests {
         old_task.await.unwrap();
         new_task.await.unwrap();
         assert_eq!(old_sink.messages.load(Ordering::SeqCst), 1);
+        assert_eq!(source.active_streams(), 0);
+        assert_eq!(source.maximum_active_streams(), 1);
     }
 
     #[test]

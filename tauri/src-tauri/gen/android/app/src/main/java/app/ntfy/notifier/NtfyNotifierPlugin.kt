@@ -2,8 +2,6 @@ package app.ntfy.notifier
 
 import android.Manifest
 import android.app.Activity
-import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.ActivityCompat
@@ -58,7 +56,8 @@ class NtfyNotifierPlugin(private val activity: Activity) : Plugin(activity) {
 
     configExecutor.execute {
       try {
-        invoke.resolve(configStore.savePublicConfig(config).toJsObject())
+        val saved = configStore.savePublicConfig(config)
+        invoke.resolve(saved.toJsObject())
       } catch (error: Exception) {
         invoke.reject(safeConfigError(error))
       }
@@ -68,35 +67,35 @@ class NtfyNotifierPlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun startService(invoke: Invoke) {
     requestNotificationPermission()
-    val context = activity.applicationContext
-    val intent = Intent(context, NotificationService::class.java)
-    ContextCompat.startForegroundService(context, intent)
+    NotificationService.sendAction(
+      activity.applicationContext,
+      NotificationService.ACTION_START
+    )
+    invoke.resolve()
+  }
+
+  @Command
+  fun reconfigureService(invoke: Invoke) {
+    requestNotificationPermission()
+    NotificationService.sendAction(
+      activity.applicationContext,
+      NotificationService.ACTION_RECONFIGURE
+    )
     invoke.resolve()
   }
 
   @Command
   fun setAutoStart(invoke: Invoke) {
     val args = invoke.getArgs()
-    NotificationService.setAutoStart(activity.applicationContext, args.getBoolean("enabled", false))
-    invoke.resolve()
-  }
-
-  @Command
-  fun updateNotifications(invoke: Invoke) {
-    val args = invoke.getArgs()
-    val title = args.getString("title")
-    val message = args.getString("message")
-    val otp = args.getString("otp", null)
-    NotificationService.updateLatest(title, message, otp)
-    NotificationService.showAlert(title, message, otp)
-    invoke.resolve()
-  }
-
-  @Command
-  fun copyToClipboard(invoke: Invoke) {
-    val args = invoke.getArgs()
-    NotificationService.copyToClipboard(activity.applicationContext, args.getString("text"))
-    invoke.resolve()
+    if (NotificationService.setAutoStart(
+        activity.applicationContext,
+        args.getBoolean("enabled", false)
+      )
+    ) {
+      invoke.resolve()
+    } else {
+      invoke.reject("CONFIG_IO: 保存开机启动设置失败")
+    }
   }
 
   private fun requestNotificationPermission() {

@@ -20,7 +20,7 @@ const CREDENTIAL_PROVIDER: &str = "windows-dpapi";
 #[cfg(not(windows))]
 const CREDENTIAL_PROVIDER: &str = "legacy-utf16le-base64";
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Config {
     pub server: String,
@@ -31,6 +31,12 @@ pub struct Config {
     pub auto_start: bool,
     pub auto_copy_otp: bool,
     pub allow_insecure_http: bool,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Config(<redacted>)")
+    }
 }
 
 impl Default for Config {
@@ -713,6 +719,16 @@ mod tests {
         assert_eq!(cfg.theme_mode, "system");
         assert_eq!(cfg.topic, "");
         assert!(!cfg.allow_insecure_http);
+    }
+
+    #[test]
+    fn config_debug_output_never_exposes_connection_fields() {
+        let config = sample_config("dark");
+        let debug = format!("{config:?}");
+
+        assert_eq!(debug, "Config(<redacted>)");
+        assert!(!debug.contains("secret123"));
+        assert!(!debug.contains("ntfy.example.com"));
     }
 
     #[test]

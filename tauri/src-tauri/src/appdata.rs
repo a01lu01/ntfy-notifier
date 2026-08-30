@@ -4,7 +4,7 @@ use std::sync::Mutex;
 static OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// 注入数据目录（移动端在 setup 时注入 app_data_dir；测试用）。
-#[cfg(any(mobile, test))]
+#[cfg(any(mobile, target_os = "android", test))]
 pub fn set(dir: PathBuf) {
     *OVERRIDE.lock().unwrap() = Some(dir);
 }

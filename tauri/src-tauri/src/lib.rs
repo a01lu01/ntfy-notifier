@@ -1,7 +1,10 @@
+#[cfg(any(target_os = "android", test))]
+mod android_subscriber;
 mod appdata;
 mod config;
 mod endpoint;
 mod history;
+#[cfg(desktop)]
 mod ntfy;
 mod otp;
 mod rules;
@@ -43,7 +46,7 @@ const MAX_PASSWORD_BYTES: usize = 8 * 1024;
 const MAX_TOPIC_BYTES: usize = 64;
 const MAX_THEME_MODE_BYTES: usize = 16;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SaveConfigInput {
     server: String,
@@ -54,6 +57,12 @@ struct SaveConfigInput {
     auto_start: bool,
     auto_copy_otp: bool,
     allow_insecure_http: bool,
+}
+
+impl std::fmt::Debug for SaveConfigInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SaveConfigInput(<redacted>)")
+    }
 }
 
 impl SaveConfigInput {
@@ -101,6 +110,7 @@ fn validate_field_size(label: &str, value: &str, max_bytes: usize) -> Result<(),
 }
 
 pub struct AppState {
+    #[cfg(desktop)]
     pub ntfy: ntfy::NtfyManager,
     config: Mutex<Option<Result<config::Config, String>>>,
 }
@@ -162,9 +172,10 @@ fn save_config(
         }
     }
     #[cfg(mobile)]
-    {
-        notify_mobile::set_auto_start(&app, stored_config.auto_start);
-    }
+    notify_mobile::set_auto_start(&app, stored_config.auto_start)?;
+    #[cfg(target_os = "android")]
+    notify_mobile::reconfigure_service(&app)?;
+    #[cfg(desktop)]
     state.ntfy.restart(stored_config.clone(), app);
     drop(cached);
     Ok(stored_config)
@@ -178,6 +189,11 @@ fn get_messages() -> Vec<history::HistoryItem> {
 #[tauri::command]
 fn clear_history() -> Result<(), String> {
     history::clear_history()
+}
+
+#[tauri::command]
+fn get_history_revision() -> Result<i64, String> {
+    history::get_history_revision()
 }
 
 #[tauri::command]
@@ -308,6 +324,7 @@ pub fn run() {
 
     builder
         .manage(AppState {
+            #[cfg(desktop)]
             ntfy: ntfy::NtfyManager::new(),
             config: Mutex::new(None),
         })
@@ -316,6 +333,7 @@ pub fn run() {
             save_config,
             get_messages,
             clear_history,
+            get_history_revision,
             get_ui_state,
             save_ui_state,
             get_rules,
@@ -414,11 +432,18 @@ pub fn run() {
             #[cfg(mobile)]
             {
                 if let Some(cfg) = cfg.as_ref() {
-                    notify_mobile::start_service(&handle);
-                    notify_mobile::set_auto_start(&handle, cfg.auto_start);
+                    if let Err(error) = notify_mobile::set_auto_start(&handle, cfg.auto_start) {
+                        eprintln!("Android auto-start compatibility update failed: {error}");
+                    }
+                    if !cfg.server.trim().is_empty() && !cfg.topic.trim().is_empty() {
+                        if let Err(error) = notify_mobile::start_service(&handle) {
+                            eprintln!("Android subscriber service start failed: {error}");
+                        }
+                    }
                 }
             }
 
+            #[cfg(desktop)]
             if let Some(cfg) = cfg {
                 let state = app.state::<AppState>();
                 state.ntfy.restart(cfg, handle);
@@ -489,6 +514,15 @@ mod save_config_input_tests {
         let error = serde_json::from_value::<SaveConfigInput>(value).unwrap_err();
 
         assert!(error.to_string().contains("missing field `password`"));
+    }
+
+    #[test]
+    fn save_input_debug_output_is_redacted() {
+        let debug = format!("{:?}", sample_input());
+
+        assert_eq!(debug, "SaveConfigInput(<redacted>)");
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("ntfy.example.com"));
     }
 
     #[test]

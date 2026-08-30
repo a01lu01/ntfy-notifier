@@ -8,6 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 static LOCK: Mutex<()> = Mutex::new(());
 const MAX_HISTORY: usize = 1000;
@@ -31,6 +32,11 @@ fn open() -> Result<Connection, String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+    // The Activity and the Android :subscriber service use separate processes. The Rust mutex
+    // below only serializes callers within one process, so SQLite itself must wait for the other
+    // process instead of immediately failing a cursor/message transaction with SQLITE_BUSY.
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|error| error.to_string())?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
@@ -47,10 +53,31 @@ fn open() -> Result<Connection, String> {
             last_id TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (server, topic)
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS history_metadata (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            revision INTEGER NOT NULL CHECK(revision >= 0)
+         );
+         INSERT OR IGNORE INTO history_metadata (singleton, revision) VALUES (1, 0);",
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
+}
+
+fn increment_history_revision(transaction: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    let changed = transaction
+        .execute(
+            "UPDATE history_metadata
+             SET revision = CASE WHEN revision = ?1 THEN 0 ELSE revision + 1 END
+             WHERE singleton = 1",
+            params![i64::MAX],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err("历史版本元数据缺失".to_string())
+    }
 }
 
 impl SqliteSubscriptionStore {
@@ -101,6 +128,9 @@ impl SqliteSubscriptionStore {
                 params![key.server, key.topic, message.id, now],
             )
             .map_err(|error| error.to_string())?;
+        if inserted > 0 {
+            increment_history_revision(&transaction)?;
+        }
         transaction.commit().map_err(|error| error.to_string())?;
 
         Ok(if inserted > 0 {
@@ -182,13 +212,34 @@ pub fn get_messages(limit: usize) -> Vec<HistoryItem> {
     }
 }
 
-pub fn clear_history() -> Result<(), String> {
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn get_history_revision() -> Result<i64, String> {
     let _guard = LOCK.lock().unwrap();
     let conn = open()?;
+    let revision = conn
+        .query_row(
+            "SELECT revision FROM history_metadata WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if revision < 0 {
+        Err("历史版本元数据无效".to_string())
+    } else {
+        Ok(revision)
+    }
+}
+
+pub fn clear_history() -> Result<(), String> {
+    let _guard = LOCK.lock().unwrap();
+    let mut conn = open()?;
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
     // 清空可见历史不得删除订阅游标，否则重连会重复提醒旧消息。
-    conn.execute("DELETE FROM messages", [])
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    transaction
+        .execute("DELETE FROM messages", [])
+        .map_err(|error| error.to_string())?;
+    increment_history_revision(&transaction)?;
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -247,6 +298,31 @@ mod tests {
             .unwrap()
     }
 
+    fn revision() -> i64 {
+        get_history_revision().unwrap()
+    }
+
+    #[test]
+    fn database_enables_cross_process_wal_and_busy_timeout() {
+        let _guard = unique_env();
+        let conn = open().unwrap();
+
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        let busy_timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(synchronous, 1);
+        assert_eq!(busy_timeout, 5_000);
+        assert_eq!(revision(), 0);
+    }
+
     #[test]
     fn legacy_messages_database_adds_empty_cursor_table_without_replay_seed() {
         let _guard = unique_env();
@@ -275,6 +351,7 @@ mod tests {
         let items = get_messages(10);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "old");
+        assert_eq!(revision(), 0);
     }
 
     #[test]
@@ -321,6 +398,7 @@ mod tests {
         );
         assert_eq!(store.load_cursor(&key).unwrap().as_deref(), Some(ID_1));
         assert_eq!(message_count(), 1);
+        assert_eq!(revision(), 1);
     }
 
     #[test]
@@ -351,6 +429,37 @@ mod tests {
         assert_eq!(message_count(), 1);
         assert_eq!(store.load_cursor(&key).unwrap().as_deref(), Some(ID_0));
         assert_eq!(get_messages(10)[0].title, format!("title-{ID_0}"));
+        assert_eq!(revision(), 1);
+    }
+
+    #[test]
+    fn revision_failure_rolls_back_message_and_cursor_together() {
+        let _guard = unique_env();
+        let store = SqliteSubscriptionStore;
+        let key = key("https://example.test", "test-topic");
+        assert_eq!(
+            commit(&store, &key, &message(ID_0)).unwrap(),
+            StoreCommit::Inserted
+        );
+
+        {
+            let _db_guard = LOCK.lock().unwrap();
+            open()
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER reject_history_revision
+                     BEFORE UPDATE ON history_metadata
+                     BEGIN
+                        SELECT RAISE(ABORT, 'history revision rejected');
+                     END;",
+                )
+                .unwrap();
+        }
+
+        assert!(commit(&store, &key, &message(ID_1)).is_err());
+        assert_eq!(message_count(), 1);
+        assert_eq!(store.load_cursor(&key).unwrap().as_deref(), Some(ID_0));
+        assert_eq!(revision(), 1);
     }
 
     #[test]
@@ -371,6 +480,7 @@ mod tests {
         );
         assert_eq!(message_count(), 1);
         assert_eq!(store.load_cursor(&second).unwrap().as_deref(), Some(ID_1));
+        assert_eq!(revision(), 1);
     }
 
     #[test]
@@ -387,6 +497,37 @@ mod tests {
 
         assert_eq!(get_messages(10).len(), 0);
         assert_eq!(store.load_cursor(&key).unwrap().as_deref(), Some(ID_1));
+        assert_eq!(revision(), 2);
+    }
+
+    #[test]
+    fn clear_revision_failure_rolls_back_history_and_preserves_cursor() {
+        let _guard = unique_env();
+        let store = SqliteSubscriptionStore;
+        let key = key("https://example.test", "test-topic");
+        assert_eq!(
+            commit(&store, &key, &message(ID_1)).unwrap(),
+            StoreCommit::Inserted
+        );
+
+        {
+            let _db_guard = LOCK.lock().unwrap();
+            open()
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER reject_clear_revision
+                     BEFORE UPDATE ON history_metadata
+                     BEGIN
+                        SELECT RAISE(ABORT, 'clear revision rejected');
+                     END;",
+                )
+                .unwrap();
+        }
+
+        assert!(clear_history().is_err());
+        assert_eq!(message_count(), 1);
+        assert_eq!(store.load_cursor(&key).unwrap().as_deref(), Some(ID_1));
+        assert_eq!(revision(), 1);
     }
 
     #[test]
@@ -492,5 +633,6 @@ mod tests {
             store.load_cursor(&key).unwrap().as_deref(),
             Some("000000001004")
         );
+        assert_eq!(revision(), 1005);
     }
 }
